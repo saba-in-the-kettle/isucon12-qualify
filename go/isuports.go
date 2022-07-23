@@ -174,7 +174,7 @@ func Run() {
 	e.Logger.SetLevel(log.DEBUG)
 	e.JSONSerializer = &JSONSerializer{}
 
-	playerCache.Flush()
+	playerDetailCache.Flush()
 
 	var (
 		sqlLogger io.Closer
@@ -916,12 +916,16 @@ func playerDisqualifiedHandler(c echo.Context) error {
 		return fmt.Errorf("error retrievePlayer: %w", err)
 	}
 
+	playerDetail := PlayerDetail{
+		ID:             p.ID,
+		DisplayName:    p.DisplayName,
+		IsDisqualified: p.IsDisqualified,
+	}
+
+	playerDetailCache.Set(playerID, playerDetail)
+
 	res := PlayerDisqualifiedHandlerResult{
-		Player: PlayerDetail{
-			ID:             p.ID,
-			DisplayName:    p.DisplayName,
-			IsDisqualified: p.IsDisqualified,
-		},
+		Player: playerDetail,
 	}
 	return c.JSON(http.StatusOK, SuccessResult{Status: true, Data: res})
 }
@@ -1232,7 +1236,7 @@ type PlayerHandlerResult struct {
 	Scores []PlayerScoreDetail `json:"scores"`
 }
 
-var playerCache = NewCacheWithExpire[string, PlayerHandlerResult](3*time.Second, 3*time.Second)
+var playerDetailCache = NewCacheWithExpire[string, PlayerDetail](3*time.Second, 3*time.Second)
 
 // 参加者向けAPI
 // GET /api/player/player/:player_id
@@ -1263,25 +1267,20 @@ func playerHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "player_id is required")
 	}
 
-	cacheKey := strconv.Itoa(int(v.tenantID)) + "/" + playerID
-	{
-		phresult, ok := playerCache.Get(cacheKey)
-		if ok {
-			res := SuccessResult{
-				Status: true,
-				Data:   phresult,
+	playerDetail, ok := playerDetailCache.Get(playerID)
+	if !ok {
+		p, err := retrievePlayer(ctx, tenantDB, playerID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return echo.NewHTTPError(http.StatusNotFound, "player not found")
 			}
-			return c.JSON(http.StatusOK, res)
+			return fmt.Errorf("error retrievePlayer: %w", err)
 		}
+		playerDetail.DisplayName = p.DisplayName
+		playerDetail.ID = p.ID
+		playerDetail.IsDisqualified = p.IsDisqualified
 	}
 
-	p, err := retrievePlayer(ctx, tenantDB, playerID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return echo.NewHTTPError(http.StatusNotFound, "player not found")
-		}
-		return fmt.Errorf("error retrievePlayer: %w", err)
-	}
 	cs := []CompetitionRow{}
 	if err := tenantDB.SelectContext(
 		ctx,
@@ -1309,13 +1308,13 @@ func playerHandler(c echo.Context) error {
 			"SELECT * FROM player_score WHERE tenant_id = ? AND competition_id = ? AND player_id = ? ORDER BY row_num DESC LIMIT 1", // index 貼った
 			v.tenantID,
 			c.ID,
-			p.ID,
+			playerID,
 		); err != nil {
 			// 行がない = スコアが記録されてない
 			if errors.Is(err, sql.ErrNoRows) {
 				continue
 			}
-			return fmt.Errorf("error Select player_score: tenantID=%d, competitionID=%s, playerID=%s, %w", v.tenantID, c.ID, p.ID, err)
+			return fmt.Errorf("error Select player_score: tenantID=%d, competitionID=%s, playerID=%s, %w", v.tenantID, c.ID, playerID, err)
 		}
 		pss = append(pss, ps)
 	}
@@ -1334,14 +1333,9 @@ func playerHandler(c echo.Context) error {
 	}
 
 	phresult := PlayerHandlerResult{
-		Player: PlayerDetail{
-			ID:             p.ID,
-			DisplayName:    p.DisplayName,
-			IsDisqualified: p.IsDisqualified,
-		},
+		Player: playerDetail,
 		Scores: psds,
 	}
-	playerCache.Set(cacheKey, phresult)
 
 	res := SuccessResult{
 		Status: true,
@@ -1686,7 +1680,7 @@ type InitializeHandlerResult struct {
 // ベンチマーカーが起動したときに最初に呼ぶ
 // データベースの初期化などが実行されるため、スキーマを変更した場合などは適宜改変すること
 func initializeHandler(c echo.Context) error {
-	playerCache.Flush()
+	playerDetailCache.Flush()
 	out, err := exec.Command(initializeScript).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("error exec.Command: %s %e", string(out), err)
