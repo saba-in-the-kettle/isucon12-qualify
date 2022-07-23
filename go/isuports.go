@@ -1297,6 +1297,24 @@ func competitionScoreHandler(c echo.Context) error {
 		return fmt.Errorf("error Insert player_score")
 	}
 
+	playerIDs := make([]string, 0, len(playerScoreRows))
+	for _, ps := range playerScoreRows {
+		playerIDs = append(playerIDs, ps.PlayerID)
+	}
+
+	query, args, err := sqlx.In(`select * FROM player WHERE id in (?)`, playerIDs)
+	if err != nil {
+		return fmt.Errorf("err sqlx.In: %w", err)
+	}
+	players := make([]PlayerRow, 0)
+	if err := tenantDB.SelectContext(ctx, &players, query, args...); err != nil {
+		return fmt.Errorf("err tenantDB.SelectContext (scoreCache.Setのとこ): %w", err)
+	}
+	playerIDToPlayer := map[string]PlayerRow{}
+	for _, p := range players {
+		playerIDToPlayer[p.ID] = p
+	}
+
 	// scoreCacheを作る
 	playerIDToLatestScores := map[string]LatestScore{}
 	for _, ps := range playerScoreRows {
@@ -1306,6 +1324,7 @@ func competitionScoreHandler(c echo.Context) error {
 				PlayerID:    ps.PlayerID,
 				PlayerScore: ps.Score,
 				RowNum:      ps.RowNum,
+				DisplayName: playerIDToPlayer[ps.PlayerID].DisplayName,
 			}
 			continue
 		}
@@ -1587,6 +1606,7 @@ type LatestScore struct {
 	PlayerID    string
 	PlayerScore int64
 	RowNum      int64
+	DisplayName string
 }
 
 // competition_id -> []LatestScore
@@ -1687,25 +1707,21 @@ func competitionRankingHandler(c echo.Context) error {
 		}
 		fl.RUnlock()
 	} else {
-		// scoreCacheがあった場合 (あるはず)
-		playerIDs := make([]string, 0, len(latestScores))
-		for _, ls := range latestScores {
-			playerIDs = append(playerIDs, ls.PlayerID)
-		}
+		// scoreCacheがあった場合
 
-		query, args, err := sqlx.In(`select * FROM player WHERE id in (?)`, playerIDs)
-		if err != nil {
-			return fmt.Errorf("err sqlx.In: %w", err)
-		}
-		players := make([]PlayerRow, 0)
-		if err := tenantDB.SelectContext(ctx, &players, query, args...); err != nil {
-			return fmt.Errorf("err tenantDB.SelectContext (ランキングのscoreCacheのとこ): %w", err)
-		}
+		// playerIDs := make([]string, 0, len(latestScores))
+		// for _, ls := range latestScores {
+		// 	playerIDs = append(playerIDs, ls.PlayerID)
+		// }
 
-		playerIDToPlayer := map[string]PlayerRow{}
-		for _, p := range players {
-			playerIDToPlayer[p.ID] = p
-		}
+		// query, args, err := sqlx.In(`select * FROM player WHERE id in (?)`, playerIDs)
+		// if err != nil {
+		// 	return fmt.Errorf("err sqlx.In: %w", err)
+		// }
+		// players := make([]PlayerRow, 0)
+		// if err := tenantDB.SelectContext(ctx, &players, query, args...); err != nil {
+		// 	return fmt.Errorf("err tenantDB.SelectContext (ランキングのscoreCacheのとこ): %w", err)
+		// }
 
 		for _, ls := range latestScores {
 			pss = append(pss, struct {
@@ -1715,7 +1731,7 @@ func competitionRankingHandler(c echo.Context) error {
 			}{
 				PlayerID:    ls.PlayerID,
 				Score:       ls.PlayerScore,
-				DisplayName: playerIDToPlayer[ls.PlayerID].DisplayName,
+				DisplayName: ls.DisplayName,
 			})
 		}
 	}
