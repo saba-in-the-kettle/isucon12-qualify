@@ -97,8 +97,6 @@ func tenantDBPath(id int64) string {
 	return filepath.Join(tenantDBDir, fmt.Sprintf("%d.db", id))
 }
 
-var tenantDBMap = map[int64]*sqlx.DB{}
-
 // テナントDBに接続する
 func connectToTenantDB(id int64) (*sqlx.DB, error) {
 	if db, ok := tenantDBMap[id]; ok {
@@ -161,6 +159,7 @@ var tenantCache = NewCache[TenantRow]()
 var tenantCacheByName = NewCache[TenantRow]()
 var mutexMap = NewCache[*sync.Mutex]()
 var bililngCache = NewCache[*BillingReport]()
+var tenantDBMap = map[int64]*sqlx.DB{}
 
 func bothInit() {
 	rankingCache.Flush()
@@ -169,6 +168,11 @@ func bothInit() {
 	playerDetailCache.Flush()
 	mutexMap.Flush()
 	bililngCache.Flush()
+
+	for _, db := range tenantDBMap {
+		db.Close()
+	}
+	tenantDBMap = map[int64]*sqlx.DB{}
 
 	var tennants []TenantRow
 
