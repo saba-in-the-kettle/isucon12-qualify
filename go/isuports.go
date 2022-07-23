@@ -1295,16 +1295,15 @@ func playerHandler(c echo.Context) error {
 		return fmt.Errorf("error Select competition: %w", err)
 	}
 
+	cIDs := make([]string, 0, len(cs))
+	for _, c := range cs {
+		cIDs = append(cIDs, c.ID)
+	}
+
 	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
 	fl, err := flockByTenantID(v.tenantID)
 	if err != nil {
 		return fmt.Errorf("error flockByTenantID: %w", err)
-	}
-	defer fl.Close()
-
-	cIDs := make([]string, 0, len(cs))
-	for _, c := range cs {
-		cIDs = append(cIDs, c.ID)
 	}
 
 	// pss := make([]PlayerScoreRow, 0, len(cs))
@@ -1330,26 +1329,57 @@ func playerHandler(c echo.Context) error {
 	// }
 
 	pss := make([]PlayerScoreRow, 0, len(cs))
-	if err := tenantDB.GetContext(
+
+	// TODO: indexを貼る
+	query1, args1, err := sqlx.In(`
+	select tenant_id, id, player_id, competition_id, score, max(row_num) as row_num, created_at, updated_at from player_score where player_id = ? and competition_id in (?) group by competition_id
+	`, playerID, cIDs)
+	if err != nil {
+		return fmt.Errorf("err sqlx.In: %w", err)
+	}
+	if err := tenantDB.SelectContext(
 		ctx,
 		&pss,
-		// TODO: indexを貼る
-		"select tenant_id, id, player_id, competition_id, score, max(row_num) as row_num, created_at, updated_at from player_score where player_id = ? and competition_id in (?) group by competition_id",
-		playerID,
-		cIDs,
+		query1, args1...,
 	); err != nil {
 		return fmt.Errorf("error Select player_score: tenantID=%d, competitionID=%v, playerID=%s, %w", v.tenantID, cIDs, playerID, err)
 	}
 
-	// TODO: N+1 (INでよさそう)
+	fl.Close()
+
+	// psds := make([]PlayerScoreDetail, 0, len(pss))
+	// for _, ps := range pss {
+	// 	comp, err := retrieveCompetition(ctx, tenantDB, ps.CompetitionID)
+	// 	if err != nil {
+	// 		return fmt.Errorf("error retrieveCompetition: %w", err)
+	// 	}
+	// 	psds = append(psds, PlayerScoreDetail{
+	// 		CompetitionTitle: comp.Title,
+	// 		Score:            ps.Score,
+	// 	})
+	// }
+
+	competitionRows := make([]CompetitionRow, 0, len(pss))
+
+	query2, args2, err := sqlx.In(`
+	SELECT * FROM competition WHERE id in (?)
+	`, cIDs)
+	if err != nil {
+		return fmt.Errorf("err sqlx.In: %w", err)
+	}
+	if err := tenantDB.SelectContext(ctx, &competitionRows, query2, args2...); err != nil {
+		return fmt.Errorf("error tenantDB.SelectContext: %w", err)
+	}
+
+	cIDToCompetition := map[string]CompetitionRow{}
+	for _, c := range competitionRows {
+		cIDToCompetition[c.ID] = c
+	}
 	psds := make([]PlayerScoreDetail, 0, len(pss))
 	for _, ps := range pss {
-		comp, err := retrieveCompetition(ctx, tenantDB, ps.CompetitionID)
-		if err != nil {
-			return fmt.Errorf("error retrieveCompetition: %w", err)
-		}
+		c := cIDToCompetition[ps.CompetitionID]
 		psds = append(psds, PlayerScoreDetail{
-			CompetitionTitle: comp.Title,
+			CompetitionTitle: c.Title,
 			Score:            ps.Score,
 		})
 	}
@@ -1383,7 +1413,7 @@ type CompetitionRankingHandlerResult struct {
 // GET /api/player/competition/:competition_id/ranking
 // 大会ごとのランキングを取得する
 
-var rankingCache = NewCacheWithExpire[SuccessResult](2*time.Second, 2*time.Second)
+var rankingCache = NewCacheWithExpire[string, SuccessResult](2*time.Second, 2*time.Second)
 
 func competitionRankingHandler(c echo.Context) error {
 	ctx := context.Background()
