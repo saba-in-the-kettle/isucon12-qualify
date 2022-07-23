@@ -174,6 +174,8 @@ func Run() {
 	e.Logger.SetLevel(log.DEBUG)
 	e.JSONSerializer = &JSONSerializer{}
 
+	playerDetailCache.Flush()
+
 	var (
 		sqlLogger io.Closer
 		err       error
@@ -284,6 +286,7 @@ func parseViewer(c echo.Context) (*Viewer, error) {
 	}
 	tokenStr := cookie.Value
 
+	// TODO: go embedとかで持った方がよさそう
 	keyFilename := getEnv("ISUCON_JWT_KEY_FILE", "../public.pem")
 	keysrc, err := os.ReadFile(keyFilename)
 	if err != nil {
@@ -470,6 +473,7 @@ func lockFilePath(id int64) string {
 }
 
 // 排他ロックする
+// TODO: ファイルをGoでロックしてるのが気になる
 func flockByTenantID(tenantID int64) (io.Closer, error) {
 	p := lockFilePath(tenantID)
 
@@ -912,12 +916,16 @@ func playerDisqualifiedHandler(c echo.Context) error {
 		return fmt.Errorf("error retrievePlayer: %w", err)
 	}
 
+	playerDetail := PlayerDetail{
+		ID:             p.ID,
+		DisplayName:    p.DisplayName,
+		IsDisqualified: p.IsDisqualified,
+	}
+
+	playerDetailCache.Set(playerID, playerDetail)
+
 	res := PlayerDisqualifiedHandlerResult{
-		Player: PlayerDetail{
-			ID:             p.ID,
-			DisplayName:    p.DisplayName,
-			IsDisqualified: p.IsDisqualified,
-		},
+		Player: playerDetail,
 	}
 	return c.JSON(http.StatusOK, SuccessResult{Status: true, Data: res})
 }
@@ -1228,6 +1236,8 @@ type PlayerHandlerResult struct {
 	Scores []PlayerScoreDetail `json:"scores"`
 }
 
+var playerDetailCache = NewCacheWithExpire[string, PlayerDetail](3*time.Second, 3*time.Second)
+
 // 参加者向けAPI
 // GET /api/player/player/:player_id
 // 参加者の詳細情報を取得する
@@ -1256,18 +1266,26 @@ func playerHandler(c echo.Context) error {
 	if playerID == "" {
 		return echo.NewHTTPError(http.StatusBadRequest, "player_id is required")
 	}
-	p, err := retrievePlayer(ctx, tenantDB, playerID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return echo.NewHTTPError(http.StatusNotFound, "player not found")
+
+	playerDetail, ok := playerDetailCache.Get(playerID)
+	if !ok {
+		p, err := retrievePlayer(ctx, tenantDB, playerID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return echo.NewHTTPError(http.StatusNotFound, "player not found")
+			}
+			return fmt.Errorf("error retrievePlayer: %w", err)
 		}
-		return fmt.Errorf("error retrievePlayer: %w", err)
+		playerDetail.DisplayName = p.DisplayName
+		playerDetail.ID = p.ID
+		playerDetail.IsDisqualified = p.IsDisqualified
 	}
+
 	cs := []CompetitionRow{}
 	if err := tenantDB.SelectContext(
 		ctx,
 		&cs,
-		"SELECT * FROM competition WHERE tenant_id = ? ORDER BY created_at ASC",
+		"SELECT * FROM competition WHERE tenant_id = ? ORDER BY created_at ASC", // index貼った
 		v.tenantID,
 	); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("error Select competition: %w", err)
@@ -1280,26 +1298,28 @@ func playerHandler(c echo.Context) error {
 	}
 	defer fl.Close()
 	pss := make([]PlayerScoreRow, 0, len(cs))
+	// TODO: N+1
 	for _, c := range cs {
 		ps := PlayerScoreRow{}
 		if err := tenantDB.GetContext(
 			ctx,
 			&ps,
 			// 最後にCSVに登場したスコアを採用する = row_numが一番大きいもの
-			"SELECT * FROM player_score WHERE tenant_id = ? AND competition_id = ? AND player_id = ? ORDER BY row_num DESC LIMIT 1",
+			"SELECT * FROM player_score WHERE tenant_id = ? AND competition_id = ? AND player_id = ? ORDER BY row_num DESC LIMIT 1", // index 貼った
 			v.tenantID,
 			c.ID,
-			p.ID,
+			playerID,
 		); err != nil {
 			// 行がない = スコアが記録されてない
 			if errors.Is(err, sql.ErrNoRows) {
 				continue
 			}
-			return fmt.Errorf("error Select player_score: tenantID=%d, competitionID=%s, playerID=%s, %w", v.tenantID, c.ID, p.ID, err)
+			return fmt.Errorf("error Select player_score: tenantID=%d, competitionID=%s, playerID=%s, %w", v.tenantID, c.ID, playerID, err)
 		}
 		pss = append(pss, ps)
 	}
 
+	// TODO: N+1 (INでよさそう)
 	psds := make([]PlayerScoreDetail, 0, len(pss))
 	for _, ps := range pss {
 		comp, err := retrieveCompetition(ctx, tenantDB, ps.CompetitionID)
@@ -1312,16 +1332,14 @@ func playerHandler(c echo.Context) error {
 		})
 	}
 
+	phresult := PlayerHandlerResult{
+		Player: playerDetail,
+		Scores: psds,
+	}
+
 	res := SuccessResult{
 		Status: true,
-		Data: PlayerHandlerResult{
-			Player: PlayerDetail{
-				ID:             p.ID,
-				DisplayName:    p.DisplayName,
-				IsDisqualified: p.IsDisqualified,
-			},
-			Scores: psds,
-		},
+		Data:   phresult,
 	}
 	return c.JSON(http.StatusOK, res)
 }
@@ -1662,6 +1680,7 @@ type InitializeHandlerResult struct {
 // ベンチマーカーが起動したときに最初に呼ぶ
 // データベースの初期化などが実行されるため、スキーマを変更した場合などは適宜改変すること
 func initializeHandler(c echo.Context) error {
+	playerDetailCache.Flush()
 	out, err := exec.Command(initializeScript).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("error exec.Command: %s %e", string(out), err)
