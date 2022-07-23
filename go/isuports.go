@@ -750,15 +750,23 @@ func tenantsBillingHandler(c echo.Context) error {
 	//   を合計したものを
 	// テナントの課金とする
 	ts := []TenantRow{}
-	if err := adminDB.SelectContext(ctx, &ts, "SELECT * FROM tenant ORDER BY id DESC"); err != nil {
+
+	var query string
+	var args []interface{}
+	if beforeID == 0 {
+		query = "SELECT * FROM tenant ORDER BY id DESC LIMIT 10"
+	} else {
+		query = "SELECT * FROM tenant WHERE id < ? ORDER BY id DESC LIMIT 10"
+		args = append(args, beforeID)
+	}
+
+	if err := adminDB.SelectContext(ctx, &ts, query, args...); err != nil {
 		return fmt.Errorf("error Select tenant: %w", err)
 	}
 	tenantBillings := make([]TenantWithBilling, 0, len(ts))
 
 	for _, t := range ts {
-		if beforeID != 0 && beforeID <= t.ID {
-			continue
-		}
+
 		err := func(t TenantRow) error {
 			tb := TenantWithBilling{
 				ID:          strconv.FormatInt(t.ID, 10),
@@ -779,6 +787,7 @@ func tenantsBillingHandler(c echo.Context) error {
 			); err != nil {
 				return fmt.Errorf("failed to Select competition: %w", err)
 			}
+
 			for _, comp := range cs {
 				report, err := billingReportByCompetition(ctx, tenantDB, t.ID, comp.ID)
 				if err != nil {
@@ -791,9 +800,6 @@ func tenantsBillingHandler(c echo.Context) error {
 		}(t)
 		if err != nil {
 			return err
-		}
-		if len(tenantBillings) >= 10 {
-			break
 		}
 	}
 	return c.JSON(http.StatusOK, SuccessResult{
