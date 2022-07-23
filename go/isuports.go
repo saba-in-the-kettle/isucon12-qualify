@@ -502,6 +502,18 @@ func flockByTenantID(tenantID int64) (io.Closer, error) {
 	return fl, nil
 }
 
+// 排他ロックする
+// TODO: ファイルをGoでロックしてるのが気になる
+func flockByTenantIDComp(tenantID int64, competitionID string) (io.Closer, error) {
+	p := lockFilePath(tenantID)
+
+	fl := flock.New(p)
+	if err := fl.Lock(); err != nil {
+		return nil, fmt.Errorf("error flock.Lock: path=%s, %w", p, err)
+	}
+	return fl, nil
+}
+
 type TenantsAddHandlerResult struct {
 	Tenant TenantWithBilling `json:"tenant"`
 }
@@ -641,7 +653,7 @@ func billingReportByCompetition(ctx context.Context, tenantDB dbOrTx, tenantID i
 	}
 
 	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
-	fl, err := flockByTenantID(tenantID)
+	fl, err := flockByTenantIDComp(tenantID, competitonID)
 	if err != nil {
 		return nil, fmt.Errorf("error flockByTenantID: %w", err)
 	}
@@ -1449,7 +1461,7 @@ func competitionRankingHandler(c echo.Context) error {
 	}
 
 	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
-	fl, err := flockByTenantID(v.tenantID)
+	fl, err := flockByTenantIDComp(v.tenantID, competitionID)
 	if err != nil {
 		return fmt.Errorf("error flockByTenantID: %w", err)
 	}
