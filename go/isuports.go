@@ -1324,19 +1324,17 @@ func playerHandler(c echo.Context) error {
 		playerDetail.IsDisqualified = p.IsDisqualified
 	}
 
-	cs := []CompetitionRow{}
+	type competitionIDRow struct {
+		ID string `db:"id"`
+	}
+	cIDs := []competitionIDRow{}
 	if err := tenantDB.SelectContext(
 		ctx,
-		&cs,
-		"SELECT * FROM competition WHERE tenant_id = ? ORDER BY created_at ASC", // index貼った // TODO: IDだけでよさそう
+		&cIDs,
+		"SELECT id FROM competition WHERE ORDER BY created_at ASC", // index貼った, idだけ取ってくるようにした
 		v.tenantID,
 	); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("error Select competition: %w", err)
-	}
-
-	cIDs := make([]string, 0, len(cs))
-	for _, c := range cs {
-		cIDs = append(cIDs, c.ID)
 	}
 
 	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
@@ -1367,11 +1365,12 @@ func playerHandler(c echo.Context) error {
 	// 	pss = append(pss, ps)
 	// }
 
-	pss := make([]PlayerScoreRow, 0, len(cs))
+	pss := make([]PlayerScoreRow, 0, len(cIDs))
 
-	// TODO: indexを貼る
+	// indexを貼った
 	query1, args1, err := sqlx.In(`
-	select tenant_id, id, player_id, competition_id, score, max(row_num) as row_num, created_at, updated_at from player_score where player_id = ? and competition_id in (?) group by competition_id
+	select tenant_id, id, player_id, competition_id, score, max(row_num) as row_num, created_at, updated_at 
+	from player_score where player_id = ? and competition_id in (?) group by competition_id
 	`, playerID, cIDs)
 	if err != nil {
 		return fmt.Errorf("err sqlx.In: %w", err)

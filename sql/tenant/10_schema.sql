@@ -15,10 +15,7 @@ CREATE TABLE
     );
 
 create index
-    if not EXISTS competition_tenant_id on competition(tenant_id);
-
-create index
-    if not EXISTS competition_created_at on competition(created_at);
+    if not EXISTS competition_index on competition(created_at);
 
 CREATE TABLE
     player (
@@ -43,8 +40,4 @@ CREATE TABLE
     );
 
 create index
-    player_score_index on player_score (
-        tenant_id,
-        competition_id,
-        row_num
-    );
+    if not EXISTS player_score_index2 on player_score(player_id, competition_id);
