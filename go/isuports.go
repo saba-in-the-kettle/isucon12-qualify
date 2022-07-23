@@ -1654,7 +1654,6 @@ func competitionRankingHandler(c echo.Context) error {
 
 	latestScores, ok := scoreCache.Get(competitionID)
 	if !ok {
-		c.Logger().Infof("ランキングでキャッシュ使えてないっすね competitionID: %s", competitionID)
 
 		// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
 		fl, err := flockByTenantID(v.tenantID)
