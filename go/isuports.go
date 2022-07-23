@@ -99,11 +99,15 @@ func tenantDBPath(id int64) string {
 
 // テナントDBに接続する
 func connectToTenantDB(id int64) (*sqlx.DB, error) {
+	if db, ok := tenantDBMap[id]; ok {
+		return db, nil
+	}
 	p := tenantDBPath(id)
 	db, err := sqlx.Open(sqliteDriverName, fmt.Sprintf("file:%s?mode=rw", p))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open tenant DB: %w", err)
 	}
+	tenantDBMap[id] = db
 	return db, nil
 }
 
@@ -154,6 +158,8 @@ func (j *JSONSerializer) Deserialize(c echo.Context, i interface{}) error {
 var tenantCache = NewCache[TenantRow]()
 var tenantCacheByName = NewCache[TenantRow]()
 var mutexMap = NewCache[*sync.Mutex]()
+var bililngCache = NewCache[*BillingReport]()
+var tenantDBMap = map[int64]*sqlx.DB{}
 
 func bothInit() {
 	// rankingCache.Flush()
@@ -161,6 +167,12 @@ func bothInit() {
 	tenantCacheByName.Flush()
 	playerDetailCache.Flush()
 	mutexMap.Flush()
+	bililngCache.Flush()
+
+	for _, db := range tenantDBMap {
+		db.Close()
+	}
+	tenantDBMap = map[int64]*sqlx.DB{}
 
 	var tennants []TenantRow
 
@@ -636,6 +648,19 @@ func billingReportByCompetition(ctx context.Context, tenantDB dbOrTx, tenantID i
 		return nil, fmt.Errorf("error retrieveCompetition: %w", err)
 	}
 
+	cached, ok := bililngCache.Get(competitonID)
+	if ok {
+		return cached, nil
+	}
+
+	if !comp.FinishedAt.Valid {
+		return &BillingReport{
+			CompetitionID:    comp.ID,
+			CompetitionTitle: comp.Title,
+			PlayerCount:      0,
+		}, nil
+	}
+
 	// ランキングにアクセスした参加者のIDを取得する
 	vhs := []VisitHistorySummaryRow{}
 	if err := adminDB.SelectContext(
@@ -690,7 +715,8 @@ func billingReportByCompetition(ctx context.Context, tenantDB dbOrTx, tenantID i
 			}
 		}
 	}
-	return &BillingReport{
+
+	report := &BillingReport{
 		CompetitionID:     comp.ID,
 		CompetitionTitle:  comp.Title,
 		PlayerCount:       playerCount,
@@ -698,7 +724,13 @@ func billingReportByCompetition(ctx context.Context, tenantDB dbOrTx, tenantID i
 		BillingPlayerYen:  100 * playerCount, // スコアを登録した参加者は100円
 		BillingVisitorYen: 10 * visitorCount, // ランキングを閲覧だけした(スコアを登録していない)参加者は10円
 		BillingYen:        100*playerCount + 10*visitorCount,
-	}, nil
+	}
+
+	if comp.FinishedAt.Valid {
+		bililngCache.Set(comp.ID, report)
+	}
+
+	return report, nil
 }
 
 type TenantWithBilling struct {
@@ -777,7 +809,7 @@ func tenantsBillingHandler(c echo.Context) error {
 			if err != nil {
 				return fmt.Errorf("failed to connectToTenantDB: %w", err)
 			}
-			defer tenantDB.Close()
+
 			cs := []CompetitionRow{}
 			if err := tenantDB.SelectContext(
 				ctx,
@@ -836,7 +868,6 @@ func playersListHandler(c echo.Context) error {
 	if err != nil {
 		return fmt.Errorf("error connectToTenantDB: %w", err)
 	}
-	defer tenantDB.Close()
 
 	var pls []PlayerRow
 	if err := tenantDB.SelectContext(
@@ -882,7 +913,6 @@ func playersAddHandler(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	defer tenantDB.Close()
 
 	params, err := c.FormParams()
 	if err != nil {
@@ -945,7 +975,6 @@ func playerDisqualifiedHandler(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	defer tenantDB.Close()
 
 	playerID := c.Param("player_id")
 
@@ -1009,7 +1038,6 @@ func competitionsAddHandler(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	defer tenantDB.Close()
 
 	title := c.FormValue("title")
 
@@ -1055,7 +1083,6 @@ func competitionFinishHandler(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	defer tenantDB.Close()
 
 	id := c.Param("competition_id")
 	if id == "" {
@@ -1105,7 +1132,6 @@ func competitionScoreHandler(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	defer tenantDB.Close()
 
 	competitionID := c.Param("competition_id")
 	if competitionID == "" {
@@ -1284,7 +1310,6 @@ func billingHandler(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	defer tenantDB.Close()
 
 	cs := []CompetitionRow{}
 	if err := tenantDB.SelectContext(
@@ -1343,7 +1368,6 @@ func playerHandler(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	defer tenantDB.Close()
 
 	if err := authorizePlayer(ctx, tenantDB, v.playerID); err != nil {
 		return err
@@ -1368,20 +1392,18 @@ func playerHandler(c echo.Context) error {
 		playerDetail.IsDisqualified = p.IsDisqualified
 	}
 
-	cs := []CompetitionRow{}
-	if err := tenantDB.SelectContext(
-		ctx,
-		&cs,
-		"SELECT * FROM competition WHERE tenant_id = ? ORDER BY created_at ASC", // index貼った // TODO: IDだけでよさそう
-		v.tenantID,
-	); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("error Select competition: %w", err)
-	}
-
-	cIDs := make([]string, 0, len(cs))
-	for _, c := range cs {
-		cIDs = append(cIDs, c.ID)
-	}
+	// type competitionIDRow struct {
+	// 	ID string `db:"id"`
+	// }
+	// cIDs := []competitionIDRow{}
+	// if err := tenantDB.SelectContext(
+	// 	ctx,
+	// 	&cIDs,
+	// 	"SELECT id FROM competition WHERE ORDER BY created_at ASC", // index貼った, idだけ取ってくるようにした
+	// 	v.tenantID,
+	// ); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	// 	return fmt.Errorf("error Select competition: %w", err)
+	// }
 
 	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
 	fl, err := flockByTenantID(v.tenantID)
@@ -1411,21 +1433,16 @@ func playerHandler(c echo.Context) error {
 	// 	pss = append(pss, ps)
 	// }
 
-	pss := make([]PlayerScoreRow, 0, len(cs))
-
-	// TODO: indexを貼る
-	query1, args1, err := sqlx.In(`
-	select tenant_id, id, player_id, competition_id, score, max(row_num) as row_num, created_at, updated_at from player_score where player_id = ? and competition_id in (?) group by competition_id
-	`, playerID, cIDs)
-	if err != nil {
-		return fmt.Errorf("err sqlx.In: %w", err)
-	}
+	pss := make([]PlayerScoreRow, 0)
 	if err := tenantDB.SelectContext(
 		ctx,
 		&pss,
-		query1, args1...,
+		`
+	select tenant_id, id, player_id, competition_id, score, max(row_num) as row_num, created_at, updated_at 
+	from player_score where player_id = ? group by competition_id
+	`, playerID,
 	); err != nil {
-		return fmt.Errorf("error Select player_score: tenantID=%d, competitionID=%v, playerID=%s, %w", v.tenantID, cIDs, playerID, err)
+		return fmt.Errorf("error Select player_score: tenantID=%d, playerID=%s, %w", v.tenantID, playerID, err)
 	}
 
 	fl.Unlock()
@@ -1442,8 +1459,28 @@ func playerHandler(c echo.Context) error {
 	// 	})
 	// }
 
-	competitionRows := make([]CompetitionRow, 0, len(pss))
+	// competitionRows := make([]CompetitionRow, 0, len(pss))
 
+	// query2, args2, err := sqlx.In(`
+	// SELECT * FROM competition WHERE id in (?)
+	// `)
+	// if err != nil {
+	// 	return fmt.Errorf("err sqlx.In: %w", err)
+	// }
+	// if err := tenantDB.SelectContext(ctx, &competitionRows, query2, args2...); err != nil {
+	// 	return fmt.Errorf("error tenantDB.SelectContext: %w", err)
+	// }
+
+	// cIDToCompetition := map[string]CompetitionRow{}
+	// for _, c := range competitionRows {
+	// 	cIDToCompetition[c.ID] = c
+	// }
+
+	cIDs := make([]string, 0)
+	for _, ps := range pss {
+		cIDs = append(cIDs, ps.CompetitionID)
+	}
+	competitionRows := make([]CompetitionRow, 0, len(pss))
 	query2, args2, err := sqlx.In(`
 	SELECT * FROM competition WHERE id in (?)
 	`, cIDs)
@@ -1453,11 +1490,11 @@ func playerHandler(c echo.Context) error {
 	if err := tenantDB.SelectContext(ctx, &competitionRows, query2, args2...); err != nil {
 		return fmt.Errorf("error tenantDB.SelectContext: %w", err)
 	}
-
 	cIDToCompetition := map[string]CompetitionRow{}
 	for _, c := range competitionRows {
 		cIDToCompetition[c.ID] = c
 	}
+
 	psds := make([]PlayerScoreDetail, 0, len(pss))
 	for _, ps := range pss {
 		c := cIDToCompetition[ps.CompetitionID]
@@ -1522,7 +1559,6 @@ func competitionRankingHandler(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	defer tenantDB.Close()
 
 	if err := authorizePlayer(ctx, tenantDB, v.playerID); err != nil {
 		return err
@@ -1688,7 +1724,6 @@ func playerCompetitionsHandler(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	defer tenantDB.Close()
 
 	if err := authorizePlayer(ctx, tenantDB, v.playerID); err != nil {
 		return err
@@ -1712,7 +1747,6 @@ func organizerCompetitionsHandler(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	defer tenantDB.Close()
 
 	return competitionsHandler(c, v, tenantDB)
 }
