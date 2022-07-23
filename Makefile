@@ -43,8 +43,8 @@ deploy-sql:
 		scp sql/init.sh $$s:~/webapp/sql/init.sh;\
 		scp sql/init.sql $$s:~/webapp/sql/init.sql;\
 		scp sql/init.sql $$s:~/webapp/sql/sqlite3-to-sql;\
-		scp sql/admin $$s:~/webapp/sql/admin;\
-		scp sql/tenant $$s:~/webapp/sql/tenant;\
+		scp -r sql/admin $$s:~/webapp/sql/admin;\
+		scp -r sql/tenant $$s:~/webapp/sql/tenant;\
 	done
 
 .PHONY: deploy-config
