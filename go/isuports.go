@@ -25,7 +25,6 @@ import (
 	"github.com/kaz/pprotein/integration/echov4"
 
 	"github.com/go-sql-driver/mysql"
-	"github.com/gofrs/flock"
 	"github.com/jmoiron/sqlx"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
@@ -104,6 +103,7 @@ func connectToTenantDB(id int64) (*sqlx.DB, error) {
 		return db, nil
 	}
 	p := tenantDBPath(id)
+	log.Printf(fmt.Sprintf("file:%s?mode=rw", p))
 	db, err := sqlx.Open(sqliteDriverName, fmt.Sprintf("file:%s?mode=rw", p))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open tenant DB: %w", err)
@@ -158,7 +158,7 @@ func (j *JSONSerializer) Deserialize(c echo.Context, i interface{}) error {
 
 var tenantCache = NewCache[TenantRow]()
 var tenantCacheByName = NewCache[TenantRow]()
-var mutexMap = NewCache[*sync.Mutex]()
+var mutexMap = NewCache[*sync.RWMutex]()
 var bililngCache = NewCache[*BillingReport]()
 var tenantDBMap = map[int64]*sqlx.DB{}
 var playerCache = NewCache[PlayerRow]()
@@ -188,18 +188,19 @@ func bothInit() {
 		tenantCache.Set(fmt.Sprintf("%d", tenant.ID), tenant)
 		tenantCacheByName.Set(tenant.Name, tenant)
 
-		var players []PlayerRow
-		db, err := connectToTenantDB(tenant.ID)
-		if err != nil {
-			log.Fatal(err)
-		}
-		err = db.Select(&players, "SELECT * FROM player")
-		if err != nil {
-			log.Fatal()
-		}
-		for _, player := range players {
-			playerCache.Set(fmt.Sprintf("%d-%s", tenant.ID, player.ID), player)
-		}
+		// これでぶっ壊れてた
+		// var players []PlayerRow
+		// db, err := connectToTenantDB(tenant.ID)
+		// if err != nil {
+		// 	log.Fatal(err)
+		// }
+		// err = db.Select(&players, "SELECT * FROM player")
+		// if err != nil {
+		// 	log.Fatal(err)
+		// }
+		// for _, player := range players {
+		// 	playerCache.Set(fmt.Sprintf("%d-%s", tenant.ID, player.ID), player)
+		// }
 	}
 
 }
@@ -519,31 +520,31 @@ func lockFilePath(id int64) string {
 }
 
 // 排他ロックする
-// TODO: ファイルをGoでロックしてるのが気になる
-func flockByTenantID(tenantID int64) (*sync.Mutex, error) {
+func flockByTenantID(tenantID int64) (*sync.RWMutex, error) {
 	m, ok := mutexMap.Get(fmt.Sprintf("%d", tenantID))
 
 	if ok {
 		m.Lock()
 		return m, nil
 	} else {
-		newM := &sync.Mutex{}
+		newM := &sync.RWMutex{}
 		newM.Lock()
 		mutexMap.Set(fmt.Sprintf("%d", tenantID), newM)
 		return newM, nil
 	}
 }
+func fRlockByTenantID(tenantID int64) (*sync.RWMutex, error) {
+	m, ok := mutexMap.Get(fmt.Sprintf("%d", tenantID))
 
-// 排他ロックする
-// TODO: ファイルをGoでロックしてるのが気になる
-func flockByTenantIDComp(tenantID int64, competitionID string) (io.Closer, error) {
-	p := lockFilePathComp(tenantID, competitionID)
-
-	fl := flock.New(p)
-	if err := fl.Lock(); err != nil {
-		return nil, fmt.Errorf("error flock.Lock: path=%s, %w", p, err)
+	if ok {
+		m.RLock()
+		return m, nil
+	} else {
+		newM := &sync.RWMutex{}
+		newM.RLock()
+		mutexMap.Set(fmt.Sprintf("%d", tenantID), newM)
+		return newM, nil
 	}
-	return fl, nil
 }
 
 // 排他ロックのためのファイル名を生成する
@@ -704,11 +705,11 @@ func billingReportByCompetition(ctx context.Context, tenantDB dbOrTx, tenantID i
 	}
 
 	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
-	fl, err := flockByTenantID(tenantID)
+	fl, err := fRlockByTenantID(tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("error flockByTenantID: %w", err)
 	}
-	defer fl.Unlock()
+	defer fl.RUnlock()
 
 	// スコアを登録した参加者のIDを取得する
 	scoredPlayerIDs := []string{}
@@ -1454,7 +1455,7 @@ func playerHandler(c echo.Context) error {
 	// }
 
 	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
-	fl, err := flockByTenantID(v.tenantID)
+	fl, err := fRlockByTenantID(v.tenantID)
 	if err != nil {
 		return fmt.Errorf("error flockByTenantID: %w", err)
 	}
@@ -1493,7 +1494,7 @@ func playerHandler(c echo.Context) error {
 		return fmt.Errorf("error Select player_score: tenantID=%d, playerID=%s, %w", v.tenantID, playerID, err)
 	}
 
-	fl.Unlock()
+	fl.RUnlock()
 
 	// psds := make([]PlayerScoreDetail, 0, len(pss))
 	// for _, ps := range pss {
@@ -1661,8 +1662,9 @@ func competitionRankingHandler(c echo.Context) error {
 	latestScores, ok := scoreCache.Get(competition.ID)
 	if !ok {
 		// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
-		fl, err := flockByTenantID(v.tenantID)
+		fl, err := fRlockByTenantID(v.tenantID)
 		if err != nil {
+			fl.RUnlock()
 			return fmt.Errorf("error flockByTenantID: %w", err)
 		}
 
@@ -1681,9 +1683,10 @@ func competitionRankingHandler(c echo.Context) error {
 			 `,
 			competitionID,
 		); err != nil {
+			fl.RUnlock()
 			return fmt.Errorf("error Select player_score: tenantID=%d, competitionID=%s, %w", tenant.ID, competitionID, err)
 		}
-		fl.Unlock()
+		fl.RUnlock()
 	} else {
 		c.Logger().Infof("scoreCache hit: competitionID: %s", competition.ID)
 		// scoreCacheがあった場合 (あるはず)
