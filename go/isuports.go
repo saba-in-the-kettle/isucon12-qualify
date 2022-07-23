@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -165,6 +164,10 @@ func (j *JSONSerializer) Deserialize(c echo.Context, i interface{}) error {
 		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("Syntax error: offset=%v, error=%v", se.Offset, se.Error())).SetInternal(err)
 	}
 	return err
+}
+
+func bothInit() {
+	rankingCache.Flush()
 }
 
 // Run は cmd/isuports/main.go から呼ばれるエントリーポイントです
@@ -1361,6 +1364,8 @@ type CompetitionRankingHandlerResult struct {
 // GET /api/player/competition/:competition_id/ranking
 // 大会ごとのランキングを取得する
 
+var rankingCache = NewCacheWithExpire[SuccessResult](2*time.Second, 2*time.Second)
+
 func competitionRankingHandler(c echo.Context) error {
 	ctx := context.Background()
 	v, err := parseViewer(c)
@@ -1432,48 +1437,28 @@ func competitionRankingHandler(c echo.Context) error {
 		PlayerID      string `db:"player_id"`
 		CompetitionID string `db:"competition_id"`
 		Score         int64  `db:"score"`
-		RowNum        int64  `db:"row_num"`
-		CreatedAt     int64  `db:"created_at"`
-		UpdatedAt     int64  `db:"updated_at"`
 		DisplayName   string `db:"display_name"`
 	}{}
 
 	if err := tenantDB.SelectContext(
 		ctx,
 		&pss,
-		"SELECT ps.*,p.display_name FROM player_score as ps"+
-			" INNER JOIN player p on ps.player_id = p.id"+
-			" WHERE ps.tenant_id = ? AND ps.competition_id = ? ORDER BY ps.row_num DESC",
+		"SELECT tmp.player_id, tmp.score, tmp.display_name FROM\n    "+
+			"(SELECT ps.player_id, max(ps.score) as score,p.display_name FROM player_score as ps\n"+
+			"    INNER JOIN player p on ps.player_id = p.id\n   "+
+			" WHERE ps.tenant_id = ? AND ps.competition_id = ?\n "+
+			"   GROUP BY ps.player_id\n    "+
+			"ORDER BY score DESC) as tmp\n  "+
+			"  INNER JOIN player_score as tps on tmp.player_id = tps.player_id and tmp.score = tps.score"+
+			" ORDER BY tmp.score DESC, tps.row_num ASC",
 		tenant.ID,
 		competitionID,
 	); err != nil {
 		return fmt.Errorf("error Select player_score: tenantID=%d, competitionID=%s, %w", tenant.ID, competitionID, err)
 	}
-	ranks := make([]CompetitionRank, 0, len(pss))
-	scoredPlayerSet := make(map[string]struct{}, len(pss))
-	for _, ps := range pss {
-		// player_scoreが同一player_id内ではrow_numの降順でソートされているので
-		// 現れたのが2回目以降のplayer_idはより大きいrow_numでスコアが出ているとみなせる
-		if _, ok := scoredPlayerSet[ps.PlayerID]; ok {
-			continue
-		}
-		scoredPlayerSet[ps.PlayerID] = struct{}{}
 
-		ranks = append(ranks, CompetitionRank{
-			Score:             ps.Score,
-			PlayerID:          ps.PlayerID,
-			PlayerDisplayName: ps.DisplayName,
-			RowNum:            ps.RowNum,
-		})
-	}
-	sort.Slice(ranks, func(i, j int) bool {
-		if ranks[i].Score == ranks[j].Score {
-			return ranks[i].RowNum < ranks[j].RowNum
-		}
-		return ranks[i].Score > ranks[j].Score
-	})
 	pagedRanks := make([]CompetitionRank, 0, 100)
-	for i, rank := range ranks {
+	for i, rank := range pss {
 		if int64(i) < rankAfter {
 			continue
 		}
@@ -1481,7 +1466,7 @@ func competitionRankingHandler(c echo.Context) error {
 			Rank:              int64(i + 1),
 			Score:             rank.Score,
 			PlayerID:          rank.PlayerID,
-			PlayerDisplayName: rank.PlayerDisplayName,
+			PlayerDisplayName: rank.DisplayName,
 		})
 		if len(pagedRanks) >= 100 {
 			break
@@ -1499,6 +1484,9 @@ func competitionRankingHandler(c echo.Context) error {
 			Ranks: pagedRanks,
 		},
 	}
+
+	// rankingCache.Set(fmt.Sprintf("%d", tenant.ID)+"/"+competitionID, res)
+
 	return c.JSON(http.StatusOK, res)
 }
 
