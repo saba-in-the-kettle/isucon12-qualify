@@ -21,7 +21,7 @@ START_ECHO=echo "$(GREEN)$(BOLD)[INFO] start $@ $$s $(RESET)"
 build:
 	@ $(START_ECHO);\
 	cd $(BUILD_DIR); \
-	GOOS=linux GOARCH=amd64 go build -o $(BIN_NAME) *.go
+	GOOS=linux GOARCH=amd64 go build ./cmd/isuports/main.go
 
 .PHONY: deploy-app
 deploy-app: build
@@ -29,7 +29,9 @@ deploy-app: build
 		$(START_ECHO);\
 		ssh $$s "sudo systemctl daemon-reload";\
 		ssh $$s "sudo systemctl stop $(SERVICE_NAME)";\
+		mv go/main go/$(BIN_NAME);\
 		scp $(BUILD_DIR)/$(BIN_NAME) $$s:$(SERVER_BINARY_DIR);\
+		ssh $$s "chmod +x  $(SERVER_BINARY_DIR)/$(BIN_NAME)";\
 		ssh $$s "sudo systemctl start $(SERVICE_NAME)";\
 	done
 
