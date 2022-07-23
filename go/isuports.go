@@ -184,7 +184,7 @@ func bothInit() {
 	}
 	for _, tenant := range tennants {
 		tenantCache.Set(fmt.Sprintf("%d", tenant.ID), tenant)
-		tenantCache.Set(tenant.Name, tenant)
+		tenantCacheByName.Set(tenant.Name, tenant)
 	}
 
 }
@@ -659,7 +659,7 @@ func billingReportByCompetition(ctx context.Context, tenantDB dbOrTx, tenantID i
 	}
 
 	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
-	fl, err := flockByTenantIDComp(tenantID, competitonID)
+	fl, err := flockByTenantID(tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("error flockByTenantID: %w", err)
 	}
@@ -752,12 +752,15 @@ func tenantsBillingHandler(c echo.Context) error {
 	//   を合計したものを
 	// テナントの課金とする
 	ts := []TenantRow{}
-	if err := adminDB.SelectContext(ctx, &ts, "SELECT * FROM tenant WHERE id < ? ORDER BY id DESC LIMIT 10", beforeID); err != nil {
+	if err := adminDB.SelectContext(ctx, &ts, "SELECT * FROM tenant ORDER BY id DESC"); err != nil {
 		return fmt.Errorf("error Select tenant: %w", err)
 	}
 	tenantBillings := make([]TenantWithBilling, 0, len(ts))
 
 	for _, t := range ts {
+		if beforeID != 0 && beforeID <= t.ID {
+			continue
+		}
 		err := func(t TenantRow) error {
 			tb := TenantWithBilling{
 				ID:          strconv.FormatInt(t.ID, 10),
@@ -790,6 +793,9 @@ func tenantsBillingHandler(c echo.Context) error {
 		}(t)
 		if err != nil {
 			return err
+		}
+		if len(tenantBillings) >= 10 {
+			break
 		}
 	}
 	return c.JSON(http.StatusOK, SuccessResult{
@@ -1515,7 +1521,7 @@ func competitionRankingHandler(c echo.Context) error {
 	}
 
 	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
-	fl, err := flockByTenantIDComp(v.tenantID, competitionID)
+	fl, err := flockByTenantID(v.tenantID)
 	if err != nil {
 		return fmt.Errorf("error flockByTenantID: %w", err)
 	}
