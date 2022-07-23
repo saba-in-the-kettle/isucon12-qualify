@@ -10,8 +10,9 @@ set -e
 truncate -s 0 /var/log/mysql/mysql-slow.log
 truncate -s 0 /var/log/nginx/access.log
 
-sudo systemctl restart nginx
+sudo systemctl disable --now nginx
 sudo systemctl restart mysql
+sudo systemctl disable --now netdata
 
 QUERY="CREATE USER IF NOT EXISTS 'isucon'@'%' identified by 'isucon';
 GRANT ALL privileges on *.* to isucon@'%';

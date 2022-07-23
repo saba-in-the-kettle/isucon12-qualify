@@ -22,8 +22,6 @@ import (
 
 	"github.com/goccy/go-json"
 
-	"github.com/kaz/pprotein/integration/echov4"
-
 	"github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
 	"github.com/labstack/echo/v4"
@@ -103,7 +101,6 @@ func connectToTenantDB(id int64) (*sqlx.DB, error) {
 		return db, nil
 	}
 	p := tenantDBPath(id)
-	log.Printf(fmt.Sprintf("file:%s?mode=rw", p))
 	db, err := sqlx.Open(sqliteDriverName, fmt.Sprintf("file:%s?mode=rw", p))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open tenant DB: %w", err)
@@ -171,6 +168,7 @@ func bothInit() {
 	mutexMap.Flush()
 	bililngCache.Flush()
 	playerCache.Flush()
+	scoreCache.Flush()
 
 	for _, db := range tenantDBMap {
 		db.Close()
@@ -208,7 +206,7 @@ func bothInit() {
 func Run() {
 	e := echo.New()
 	e.Debug = false
-	e.Logger.SetLevel(log.DEBUG)
+	e.Logger.SetLevel(log.OFF)
 	e.JSONSerializer = &JSONSerializer{}
 
 	var (
@@ -257,7 +255,7 @@ func Run() {
 	// ベンチマーカー向けAPI
 	e.POST("/initialize", initializeHandler)
 
-	echov4.EnableDebugHandler(e)
+	// echov4.EnableDebugHandler(e)
 
 	e.HTTPErrorHandler = errorResponseHandler
 
@@ -1296,6 +1294,24 @@ func competitionScoreHandler(c echo.Context) error {
 		return fmt.Errorf("error Insert player_score")
 	}
 
+	playerIDs := make([]string, 0, len(playerScoreRows))
+	for _, ps := range playerScoreRows {
+		playerIDs = append(playerIDs, ps.PlayerID)
+	}
+
+	query, args, err := sqlx.In(`select * FROM player WHERE id in (?)`, playerIDs)
+	if err != nil {
+		return fmt.Errorf("err sqlx.In: %w", err)
+	}
+	players := make([]PlayerRow, 0)
+	if err := tenantDB.SelectContext(ctx, &players, query, args...); err != nil {
+		return fmt.Errorf("err tenantDB.SelectContext (scoreCache.Setのとこ): %w", err)
+	}
+	playerIDToPlayer := map[string]PlayerRow{}
+	for _, p := range players {
+		playerIDToPlayer[p.ID] = p
+	}
+
 	// scoreCacheを作る
 	playerIDToLatestScores := map[string]LatestScore{}
 	for _, ps := range playerScoreRows {
@@ -1305,6 +1321,7 @@ func competitionScoreHandler(c echo.Context) error {
 				PlayerID:    ps.PlayerID,
 				PlayerScore: ps.Score,
 				RowNum:      ps.RowNum,
+				DisplayName: playerIDToPlayer[ps.PlayerID].DisplayName,
 			}
 			continue
 		}
@@ -1586,6 +1603,7 @@ type LatestScore struct {
 	PlayerID    string
 	PlayerScore int64
 	RowNum      int64
+	DisplayName string
 }
 
 // competition_id -> []LatestScore
@@ -1657,9 +1675,8 @@ func competitionRankingHandler(c echo.Context) error {
 		DisplayName string `db:"display_name"`
 	}{}
 
-	latestScores, ok := scoreCache.Get(competitionID)
+	latestScores, ok := scoreCache.Get(competition.ID)
 	if !ok {
-
 		// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
 		fl, err := fRlockByTenantID(v.tenantID)
 		if err != nil {
@@ -1687,25 +1704,21 @@ func competitionRankingHandler(c echo.Context) error {
 		}
 		fl.RUnlock()
 	} else {
-		// scoreCacheがあった場合 (あるはず)
-		playerIDs := make([]string, 0, len(latestScores))
-		for _, ls := range latestScores {
-			playerIDs = append(playerIDs, ls.PlayerID)
-		}
+		// scoreCacheがあった場合
 
-		query, args, err := sqlx.In(`select * FROM player WHERE id in (?)`, playerIDs)
-		if err != nil {
-			return fmt.Errorf("err sqlx.In: %w", err)
-		}
-		players := make([]PlayerRow, 0)
-		if err := tenantDB.SelectContext(ctx, &players, query, args...); err != nil {
-			return fmt.Errorf("err tenantDB.SelectContext (ランキングのscoreCacheのとこ): %w", err)
-		}
+		// playerIDs := make([]string, 0, len(latestScores))
+		// for _, ls := range latestScores {
+		// 	playerIDs = append(playerIDs, ls.PlayerID)
+		// }
 
-		playerIDToPlayer := map[string]PlayerRow{}
-		for _, p := range players {
-			playerIDToPlayer[p.ID] = p
-		}
+		// query, args, err := sqlx.In(`select * FROM player WHERE id in (?)`, playerIDs)
+		// if err != nil {
+		// 	return fmt.Errorf("err sqlx.In: %w", err)
+		// }
+		// players := make([]PlayerRow, 0)
+		// if err := tenantDB.SelectContext(ctx, &players, query, args...); err != nil {
+		// 	return fmt.Errorf("err tenantDB.SelectContext (ランキングのscoreCacheのとこ): %w", err)
+		// }
 
 		for _, ls := range latestScores {
 			pss = append(pss, struct {
@@ -1715,7 +1728,7 @@ func competitionRankingHandler(c echo.Context) error {
 			}{
 				PlayerID:    ls.PlayerID,
 				Score:       ls.PlayerScore,
-				DisplayName: playerIDToPlayer[ls.PlayerID].DisplayName,
+				DisplayName: ls.DisplayName,
 			})
 		}
 	}
