@@ -52,7 +52,7 @@ var (
 
 	sqliteDriverName             = "sqlite3"
 	auto_increment_id      int64 = 0
-	auto_increment_id_base       = strconv.FormatInt(time.Now().Unix(), 10)
+	auto_increment_id_base       = strconv.FormatInt(time.Now().Unix()%100000, 10)
 )
 
 // 環境変数を取得する、なければデフォルト値を返す
