@@ -428,14 +428,22 @@ func retrievePlayer(ctx context.Context, tenantDB dbOrTx, id string) (*PlayerRow
 // 参加者を認可する
 // 参加者向けAPIで呼ばれる
 func authorizePlayer(ctx context.Context, tenantDB dbOrTx, id string) error {
-	player, err := retrievePlayer(ctx, tenantDB, id)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return echo.NewHTTPError(http.StatusUnauthorized, "player not found")
+	playerDetail, ok := playerDetailCache.Get(id)
+
+	if !ok {
+		player, err := retrievePlayer(ctx, tenantDB, id)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return echo.NewHTTPError(http.StatusUnauthorized, "player not found")
+			}
+			return fmt.Errorf("error retrievePlayer from viewer: %w", err)
 		}
-		return fmt.Errorf("error retrievePlayer from viewer: %w", err)
+
+		playerDetail.ID = player.ID
+		playerDetail.DisplayName = player.DisplayName
+		playerDetail.IsDisqualified = player.IsDisqualified
 	}
-	if player.IsDisqualified {
+	if playerDetail.IsDisqualified {
 		return echo.NewHTTPError(http.StatusForbidden, "player is disqualified")
 	}
 	return nil
