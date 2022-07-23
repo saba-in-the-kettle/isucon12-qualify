@@ -149,6 +149,7 @@ func SetCacheControlPrivate(next echo.HandlerFunc) echo.HandlerFunc {
 }
 
 // JSONSerializer を入れ替える
+// https://twitter.com/fujiwara/status/1440211187581341699
 type JSONSerializer struct{}
 
 func (j *JSONSerializer) Serialize(c echo.Context, i interface{}, indent string) error {
