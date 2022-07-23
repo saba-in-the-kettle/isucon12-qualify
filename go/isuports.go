@@ -22,8 +22,6 @@ import (
 
 	"github.com/goccy/go-json"
 
-	"github.com/kaz/pprotein/integration/echov4"
-
 	"github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
 	"github.com/labstack/echo/v4"
@@ -208,7 +206,7 @@ func bothInit() {
 func Run() {
 	e := echo.New()
 	e.Debug = false
-	e.Logger.SetLevel(log.DEBUG)
+	e.Logger.SetLevel(log.OFF)
 	e.JSONSerializer = &JSONSerializer{}
 
 	var (
@@ -257,7 +255,7 @@ func Run() {
 	// ベンチマーカー向けAPI
 	e.POST("/initialize", initializeHandler)
 
-	echov4.EnableDebugHandler(e)
+	// echov4.EnableDebugHandler(e)
 
 	e.HTTPErrorHandler = errorResponseHandler
 
