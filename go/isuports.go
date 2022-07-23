@@ -1424,8 +1424,8 @@ func competitionRankingHandler(c echo.Context) error {
 		ctx,
 		&pss,
 		"SELECT ps.*,p.display_name FROM player_score as ps"+
-			"INNER JOIN player p on ps.player_id = p.id"+
-			"WHERE ps.tenant_id = ? AND ps.competition_id = ? ORDER BY ps.row_num DESC",
+			" INNER JOIN player p on ps.player_id = p.id"+
+			" WHERE ps.tenant_id = ? AND ps.competition_id = ? ORDER BY ps.row_num DESC",
 		tenant.ID,
 		competitionID,
 	); err != nil {
