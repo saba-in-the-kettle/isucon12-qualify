@@ -41,3 +41,11 @@ CREATE TABLE
         created_at BIGINT NOT NULL,
         updated_at BIGINT NOT NULL
     );
+
+create index
+    if not EXISTS player_score_tenant_id_competition_id_player_id on player_score(
+        tenant_id,
+        competition_id,
+        player_id,
+        row_num
+    );

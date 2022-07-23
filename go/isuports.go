@@ -283,6 +283,7 @@ func parseViewer(c echo.Context) (*Viewer, error) {
 	}
 	tokenStr := cookie.Value
 
+	// TODO: go embedとかで持った方がよさそう
 	keyFilename := getEnv("ISUCON_JWT_KEY_FILE", "../public.pem")
 	keysrc, err := os.ReadFile(keyFilename)
 	if err != nil {
@@ -469,6 +470,7 @@ func lockFilePath(id int64) string {
 }
 
 // 排他ロックする
+// TODO: ファイルをGoでロックしてるのが気になる
 func flockByTenantID(tenantID int64) (io.Closer, error) {
 	p := lockFilePath(tenantID)
 
@@ -1279,13 +1281,14 @@ func playerHandler(c echo.Context) error {
 	}
 	defer fl.Close()
 	pss := make([]PlayerScoreRow, 0, len(cs))
+	// TODO: N+1
 	for _, c := range cs {
 		ps := PlayerScoreRow{}
 		if err := tenantDB.GetContext(
 			ctx,
 			&ps,
 			// 最後にCSVに登場したスコアを採用する = row_numが一番大きいもの
-			"SELECT * FROM player_score WHERE tenant_id = ? AND competition_id = ? AND player_id = ? ORDER BY row_num DESC LIMIT 1",
+			"SELECT * FROM player_score WHERE tenant_id = ? AND competition_id = ? AND player_id = ? ORDER BY row_num DESC LIMIT 1", // index 貼った
 			v.tenantID,
 			c.ID,
 			p.ID,
@@ -1299,6 +1302,7 @@ func playerHandler(c echo.Context) error {
 		pss = append(pss, ps)
 	}
 
+	// TODO: N+1 (INでよさそう)
 	psds := make([]PlayerScoreDetail, 0, len(pss))
 	for _, ps := range pss {
 		comp, err := retrieveCompetition(ctx, tenantDB, ps.CompetitionID)
