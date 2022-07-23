@@ -41,7 +41,10 @@ deploy-sql:
 	@ for s in s1 s2 s3; do\
 		$(START_ECHO);\
 		scp sql/init.sh $$s:~/webapp/sql/init.sh;\
-		scp sql/0_Schema.sql $$s:~/webapp/sql/0_Schema.sql;\
+		scp sql/init.sql $$s:~/webapp/sql/init.sql;\
+		scp sql/init.sql $$s:~/webapp/sql/sqlite3-to-sql;\
+		scp sql/admin $$s:~/webapp/sql/admin;\
+		scp sql/tenant $$s:~/webapp/sql/tenant;\
 	done
 
 .PHONY: deploy-config
