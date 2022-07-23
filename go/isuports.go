@@ -171,6 +171,7 @@ func bothInit() {
 	mutexMap.Flush()
 	bililngCache.Flush()
 	playerCache.Flush()
+	scoreCache.Flush()
 
 	for _, db := range tenantDBMap {
 		db.Close()
