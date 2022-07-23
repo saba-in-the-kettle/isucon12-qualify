@@ -21,7 +21,7 @@ START_ECHO=echo "$(GREEN)$(BOLD)[INFO] start $@ $$s $(RESET)"
 build:
 	@ $(START_ECHO);\
 	cd $(BUILD_DIR); \
-	docker-compose up --build
+	GOOS=linux GOARCH=amd64 go build ./cmd/isuports/main.go
 
 .PHONY: deploy-app
 deploy-app: build

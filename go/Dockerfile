@@ -11,9 +11,13 @@ RUN apt-get update && \
   apt-get -y install mysql-client
 
 RUN useradd --uid=1001 --create-home isucon
+USER isucon
 
 RUN mkdir -p /home/isucon/webapp/go
 WORKDIR /home/isucon/webapp/go
+COPY --chown=isucon:isucon ./ /home/isucon/webapp/go/
 
 ENV GOPATH=/home/isucon/tmp/go
 ENV GOCACHE=/home/isucon/tmp/go/.cache
+
+CMD ["go", "run", "./cmd/isuports/main.go"]
