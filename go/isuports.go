@@ -508,28 +508,6 @@ func flockByTenantID(tenantID int64) (*sync.Mutex, error) {
 	}
 }
 
-// 排他ロックする
-// TODO: ファイルをGoでロックしてるのが気になる
-func flockByTenantIDComp(tenantID int64, competitionID string) (*sync.Mutex, error) {
-	m, ok := mutexMap.Get(fmt.Sprintf("%d-%s", tenantID, competitionID))
-
-	if ok {
-		m.Lock()
-		return m, nil
-	} else {
-		newM := &sync.Mutex{}
-		newM.Lock()
-		mutexMap.Set(fmt.Sprintf("%d-%s", tenantID, competitionID), newM)
-		return newM, nil
-	}
-}
-
-// 排他ロックのためのファイル名を生成する
-func lockFilePathComp(id int64, comoetitionID string) string {
-	tenantDBDir := getEnv("ISUCON_TENANT_DB_DIR", "../tenant_db")
-	return filepath.Join(tenantDBDir, fmt.Sprintf("%d-%s.lock", id, comoetitionID))
-}
-
 type TenantsAddHandlerResult struct {
 	Tenant TenantWithBilling `json:"tenant"`
 }
@@ -669,7 +647,7 @@ func billingReportByCompetition(ctx context.Context, tenantDB dbOrTx, tenantID i
 	}
 
 	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
-	fl, err := flockByTenantIDComp(tenantID, competitonID)
+	fl, err := flockByTenantID(tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("error flockByTenantID: %w", err)
 	}
@@ -1395,8 +1373,6 @@ func playerHandler(c echo.Context) error {
 		return fmt.Errorf("error Select player_score: tenantID=%d, competitionID=%v, playerID=%s, %w", v.tenantID, cIDs, playerID, err)
 	}
 
-	fl.Unlock()
-
 	// psds := make([]PlayerScoreDetail, 0, len(pss))
 	// for _, ps := range pss {
 	// 	comp, err := retrieveCompetition(ctx, tenantDB, ps.CompetitionID)
@@ -1526,7 +1502,7 @@ func competitionRankingHandler(c echo.Context) error {
 	}
 
 	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
-	fl, err := flockByTenantIDComp(v.tenantID, competitionID)
+	fl, err := flockByTenantID(v.tenantID)
 	if err != nil {
 		return fmt.Errorf("error flockByTenantID: %w", err)
 	}
