@@ -178,7 +178,7 @@ func bothInit() {
 
 	var tennants []TenantRow
 
-	err := adminDB.Select(&tennants, "SELECT * FROM tenants")
+	err := adminDB.Select(&tennants, "SELECT * FROM tenant")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -195,8 +195,6 @@ func Run() {
 	e.Debug = false
 	e.Logger.SetLevel(log.DEBUG)
 	e.JSONSerializer = &JSONSerializer{}
-
-	bothInit()
 
 	var (
 		sqlLogger io.Closer
@@ -257,6 +255,8 @@ func Run() {
 	adminDB.SetMaxIdleConns(200)
 
 	defer adminDB.Close()
+
+	bothInit()
 
 	port := getEnv("SERVER_APP_PORT", "3000")
 	e.Logger.Infof("starting isuports server on : %s ...", port)
