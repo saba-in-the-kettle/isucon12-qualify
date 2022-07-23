@@ -140,6 +140,7 @@ func dispenseID(ctx context.Context) (string, error) {
 	return "", lastErr
 }
 
+// TODO(p1ass) これ消したい
 // 全APIにCache-Control: privateを設定する
 func SetCacheControlPrivate(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c echo.Context) error {
@@ -1345,6 +1346,7 @@ type CompetitionRankingHandlerResult struct {
 // 参加者向けAPI
 // GET /api/player/competition/:competition_id/ranking
 // 大会ごとのランキングを取得する
+
 func competitionRankingHandler(c echo.Context) error {
 	ctx := context.Background()
 	v, err := parseViewer(c)
@@ -1410,11 +1412,24 @@ func competitionRankingHandler(c echo.Context) error {
 		return fmt.Errorf("error flockByTenantID: %w", err)
 	}
 	defer fl.Close()
-	pss := []PlayerScoreRow{}
+	pss := []struct {
+		TenantID      int64  `db:"tenant_id"`
+		ID            string `db:"id"`
+		PlayerID      string `db:"player_id"`
+		CompetitionID string `db:"competition_id"`
+		Score         int64  `db:"score"`
+		RowNum        int64  `db:"row_num"`
+		CreatedAt     int64  `db:"created_at"`
+		UpdatedAt     int64  `db:"updated_at"`
+		DisplayName   string `db:"display_name"`
+	}{}
+
 	if err := tenantDB.SelectContext(
 		ctx,
 		&pss,
-		"SELECT * FROM player_score WHERE tenant_id = ? AND competition_id = ? ORDER BY row_num DESC",
+		"SELECT ps.*,p.display_name FROM player_score as ps"+
+			"INNER JOIN player p on ps.player_id = p.id"+
+			"WHERE ps.tenant_id = ? AND ps.competition_id = ? ORDER BY ps.row_num DESC",
 		tenant.ID,
 		competitionID,
 	); err != nil {
@@ -1429,14 +1444,11 @@ func competitionRankingHandler(c echo.Context) error {
 			continue
 		}
 		scoredPlayerSet[ps.PlayerID] = struct{}{}
-		p, err := retrievePlayer(ctx, tenantDB, ps.PlayerID)
-		if err != nil {
-			return fmt.Errorf("error retrievePlayer: %w", err)
-		}
+
 		ranks = append(ranks, CompetitionRank{
 			Score:             ps.Score,
-			PlayerID:          p.ID,
-			PlayerDisplayName: p.DisplayName,
+			PlayerID:          ps.PlayerID,
+			PlayerDisplayName: ps.DisplayName,
 			RowNum:            ps.RowNum,
 		})
 	}
