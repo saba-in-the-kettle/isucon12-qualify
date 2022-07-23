@@ -29,7 +29,6 @@ deploy-app: build
 		$(START_ECHO);\
 		ssh $$s "sudo systemctl daemon-reload";\
 		ssh $$s "sudo systemctl stop $(SERVICE_NAME)";\
-		mv go/main go/$(BIN_NAME);\
 		scp $(BUILD_DIR)/$(BIN_NAME) $$s:$(SERVER_BINARY_DIR);\
 		ssh $$s "chmod +x  $(SERVER_BINARY_DIR)/$(BIN_NAME)";\
 		ssh $$s "sudo systemctl start $(SERVICE_NAME)";\

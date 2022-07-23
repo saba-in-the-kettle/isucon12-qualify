@@ -140,6 +140,7 @@ func dispenseID(ctx context.Context) (string, error) {
 	return "", lastErr
 }
 
+// TODO(p1ass) これ消したい
 // 全APIにCache-Control: privateを設定する
 func SetCacheControlPrivate(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c echo.Context) error {
@@ -1341,6 +1342,9 @@ type CompetitionRankingHandlerResult struct {
 // 参加者向けAPI
 // GET /api/player/competition/:competition_id/ranking
 // 大会ごとのランキングを取得する
+
+var rankingCache = NewCache()
+
 func competitionRankingHandler(c echo.Context) error {
 	ctx := context.Background()
 	v, err := parseViewer(c)
