@@ -17,6 +17,9 @@ CREATE TABLE
 create index
     if not EXISTS competition_tenant_id on competition(tenant_id);
 
+create index
+    if not EXISTS competition_created_at on competition(created_at);
+
 CREATE TABLE
     player (
         id VARCHAR(255) NOT NULL PRIMARY KEY,
