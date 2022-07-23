@@ -135,10 +135,8 @@ func SetCacheControlPrivate(next echo.HandlerFunc) echo.HandlerFunc {
 // Run は cmd/isuports/main.go から呼ばれるエントリーポイントです
 func Run() {
 	e := echo.New()
-	e.Debug = true
+	e.Debug = false
 	e.Logger.SetLevel(log.DEBUG)
-
-	echov4.EnableDebugHandler(e)
 
 	var (
 		sqlLogger io.Closer
@@ -184,6 +182,8 @@ func Run() {
 
 	// ベンチマーカー向けAPI
 	e.POST("/initialize", initializeHandler)
+
+	echov4.EnableDebugHandler(e)
 
 	e.HTTPErrorHandler = errorResponseHandler
 
