@@ -15,6 +15,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/goccy/go-json"
@@ -49,7 +51,9 @@ var (
 
 	adminDB *sqlx.DB
 
-	sqliteDriverName = "sqlite3"
+	sqliteDriverName             = "sqlite3"
+	auto_increment_id      int64 = 0
+	auto_increment_id_base       = strconv.FormatInt(time.Now().Unix()%100000, 10)
 )
 
 // 環境変数を取得する、なければデフォルト値を返す
@@ -93,13 +97,19 @@ func tenantDBPath(id int64) string {
 	return filepath.Join(tenantDBDir, fmt.Sprintf("%d.db", id))
 }
 
+var tenantDBMap = map[int64]*sqlx.DB{}
+
 // テナントDBに接続する
 func connectToTenantDB(id int64) (*sqlx.DB, error) {
+	if db, ok := tenantDBMap[id]; ok {
+		return db, nil
+	}
 	p := tenantDBPath(id)
 	db, err := sqlx.Open(sqliteDriverName, fmt.Sprintf("file:%s?mode=rw", p))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open tenant DB: %w", err)
 	}
+	tenantDBMap[id] = db
 	return db, nil
 }
 
@@ -116,28 +126,8 @@ func createTenantDB(id int64) error {
 
 // システム全体で一意なIDを生成する
 func dispenseID(ctx context.Context) (string, error) {
-	var id int64
-	var lastErr error
-	for i := 0; i < 100; i++ {
-		var ret sql.Result
-		ret, err := adminDB.ExecContext(ctx, "REPLACE INTO id_generator (stub) VALUES (?);", "a")
-		if err != nil {
-			if merr, ok := err.(*mysql.MySQLError); ok && merr.Number == 1213 { // deadlock
-				lastErr = fmt.Errorf("error REPLACE INTO id_generator: %w", err)
-				continue
-			}
-			return "", fmt.Errorf("error REPLACE INTO id_generator: %w", err)
-		}
-		id, err = ret.LastInsertId()
-		if err != nil {
-			return "", fmt.Errorf("error ret.LastInsertId: %w", err)
-		}
-		break
-	}
-	if id != 0 {
-		return fmt.Sprintf("%x", id), nil
-	}
-	return "", lastErr
+	newId := atomic.AddInt64(&auto_increment_id, 1)
+	return fmt.Sprintf("%d%s", newId, auto_increment_id_base), nil
 }
 
 // TODO(p1ass) これ消したい
@@ -169,12 +159,16 @@ func (j *JSONSerializer) Deserialize(c echo.Context, i interface{}) error {
 
 var tenantCache = NewCache[TenantRow]()
 var tenantCacheByName = NewCache[TenantRow]()
+var mutexMap = NewCache[*sync.Mutex]()
+var bililngCache = NewCache[*BillingReport]()
 
 func bothInit() {
 	rankingCache.Flush()
 	tenantCache.Flush()
 	tenantCacheByName.Flush()
 	playerDetailCache.Flush()
+	mutexMap.Flush()
+	bililngCache.Flush()
 
 	var tennants []TenantRow
 
@@ -442,14 +436,22 @@ func retrievePlayer(ctx context.Context, tenantDB dbOrTx, id string) (*PlayerRow
 // 参加者を認可する
 // 参加者向けAPIで呼ばれる
 func authorizePlayer(ctx context.Context, tenantDB dbOrTx, id string) error {
-	player, err := retrievePlayer(ctx, tenantDB, id)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return echo.NewHTTPError(http.StatusUnauthorized, "player not found")
+	playerDetail, ok := playerDetailCache.Get(id)
+
+	if !ok {
+		player, err := retrievePlayer(ctx, tenantDB, id)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return echo.NewHTTPError(http.StatusUnauthorized, "player not found")
+			}
+			return fmt.Errorf("error retrievePlayer from viewer: %w", err)
 		}
-		return fmt.Errorf("error retrievePlayer from viewer: %w", err)
+
+		playerDetail.ID = player.ID
+		playerDetail.DisplayName = player.DisplayName
+		playerDetail.IsDisqualified = player.IsDisqualified
 	}
-	if player.IsDisqualified {
+	if playerDetail.IsDisqualified {
 		return echo.NewHTTPError(http.StatusForbidden, "player is disqualified")
 	}
 	return nil
@@ -492,14 +494,18 @@ func lockFilePath(id int64) string {
 
 // 排他ロックする
 // TODO: ファイルをGoでロックしてるのが気になる
-func flockByTenantID(tenantID int64) (io.Closer, error) {
-	p := lockFilePath(tenantID)
+func flockByTenantID(tenantID int64) (*sync.Mutex, error) {
+	m, ok := mutexMap.Get(fmt.Sprintf("%d", tenantID))
 
-	fl := flock.New(p)
-	if err := fl.Lock(); err != nil {
-		return nil, fmt.Errorf("error flock.Lock: path=%s, %w", p, err)
+	if ok {
+		m.Lock()
+		return m, nil
+	} else {
+		newM := &sync.Mutex{}
+		newM.Lock()
+		mutexMap.Set(fmt.Sprintf("%d", tenantID), newM)
+		return newM, nil
 	}
-	return fl, nil
 }
 
 // 排他ロックする
@@ -638,6 +644,19 @@ func billingReportByCompetition(ctx context.Context, tenantDB dbOrTx, tenantID i
 		return nil, fmt.Errorf("error retrieveCompetition: %w", err)
 	}
 
+	cached, ok := bililngCache.Get(competitonID)
+	if ok {
+		return cached, nil
+	}
+
+	if !comp.FinishedAt.Valid {
+		return &BillingReport{
+			CompetitionID:    comp.ID,
+			CompetitionTitle: comp.Title,
+			PlayerCount:      0,
+		}, nil
+	}
+
 	// ランキングにアクセスした参加者のIDを取得する
 	vhs := []VisitHistorySummaryRow{}
 	if err := adminDB.SelectContext(
@@ -663,7 +682,7 @@ func billingReportByCompetition(ctx context.Context, tenantDB dbOrTx, tenantID i
 	if err != nil {
 		return nil, fmt.Errorf("error flockByTenantID: %w", err)
 	}
-	defer fl.Close()
+	defer fl.Unlock()
 
 	// スコアを登録した参加者のIDを取得する
 	scoredPlayerIDs := []string{}
@@ -692,7 +711,8 @@ func billingReportByCompetition(ctx context.Context, tenantDB dbOrTx, tenantID i
 			}
 		}
 	}
-	return &BillingReport{
+
+	report := &BillingReport{
 		CompetitionID:     comp.ID,
 		CompetitionTitle:  comp.Title,
 		PlayerCount:       playerCount,
@@ -700,7 +720,13 @@ func billingReportByCompetition(ctx context.Context, tenantDB dbOrTx, tenantID i
 		BillingPlayerYen:  100 * playerCount, // スコアを登録した参加者は100円
 		BillingVisitorYen: 10 * visitorCount, // ランキングを閲覧だけした(スコアを登録していない)参加者は10円
 		BillingYen:        100*playerCount + 10*visitorCount,
-	}, nil
+	}
+
+	if comp.FinishedAt.Valid {
+		bililngCache.Set(comp.ID, report)
+	}
+
+	return report, nil
 }
 
 type TenantWithBilling struct {
@@ -752,15 +778,23 @@ func tenantsBillingHandler(c echo.Context) error {
 	//   を合計したものを
 	// テナントの課金とする
 	ts := []TenantRow{}
-	if err := adminDB.SelectContext(ctx, &ts, "SELECT * FROM tenant ORDER BY id DESC"); err != nil {
+
+	var query string
+	var args []interface{}
+	if beforeID == 0 {
+		query = "SELECT * FROM tenant ORDER BY id DESC LIMIT 10"
+	} else {
+		query = "SELECT * FROM tenant WHERE id < ? ORDER BY id DESC LIMIT 10"
+		args = append(args, beforeID)
+	}
+
+	if err := adminDB.SelectContext(ctx, &ts, query, args...); err != nil {
 		return fmt.Errorf("error Select tenant: %w", err)
 	}
 	tenantBillings := make([]TenantWithBilling, 0, len(ts))
 
 	for _, t := range ts {
-		if beforeID != 0 && beforeID <= t.ID {
-			continue
-		}
+
 		err := func(t TenantRow) error {
 			tb := TenantWithBilling{
 				ID:          strconv.FormatInt(t.ID, 10),
@@ -771,7 +805,7 @@ func tenantsBillingHandler(c echo.Context) error {
 			if err != nil {
 				return fmt.Errorf("failed to connectToTenantDB: %w", err)
 			}
-			defer tenantDB.Close()
+
 			cs := []CompetitionRow{}
 			if err := tenantDB.SelectContext(
 				ctx,
@@ -781,6 +815,7 @@ func tenantsBillingHandler(c echo.Context) error {
 			); err != nil {
 				return fmt.Errorf("failed to Select competition: %w", err)
 			}
+
 			for _, comp := range cs {
 				report, err := billingReportByCompetition(ctx, tenantDB, t.ID, comp.ID)
 				if err != nil {
@@ -793,9 +828,6 @@ func tenantsBillingHandler(c echo.Context) error {
 		}(t)
 		if err != nil {
 			return err
-		}
-		if len(tenantBillings) >= 10 {
-			break
 		}
 	}
 	return c.JSON(http.StatusOK, SuccessResult{
@@ -832,7 +864,6 @@ func playersListHandler(c echo.Context) error {
 	if err != nil {
 		return fmt.Errorf("error connectToTenantDB: %w", err)
 	}
-	defer tenantDB.Close()
 
 	var pls []PlayerRow
 	if err := tenantDB.SelectContext(
@@ -878,7 +909,6 @@ func playersAddHandler(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	defer tenantDB.Close()
 
 	params, err := c.FormParams()
 	if err != nil {
@@ -941,7 +971,6 @@ func playerDisqualifiedHandler(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	defer tenantDB.Close()
 
 	playerID := c.Param("player_id")
 
@@ -1005,7 +1034,6 @@ func competitionsAddHandler(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	defer tenantDB.Close()
 
 	title := c.FormValue("title")
 
@@ -1051,7 +1079,6 @@ func competitionFinishHandler(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	defer tenantDB.Close()
 
 	id := c.Param("competition_id")
 	if id == "" {
@@ -1101,7 +1128,6 @@ func competitionScoreHandler(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	defer tenantDB.Close()
 
 	competitionID := c.Param("competition_id")
 	if competitionID == "" {
@@ -1147,7 +1173,7 @@ func competitionScoreHandler(c echo.Context) error {
 	if err != nil {
 		return fmt.Errorf("error flockByTenantID: %w", err)
 	}
-	defer fl.Close()
+	defer fl.Unlock()
 	var rowNum int64
 	playerScoreRows := []PlayerScoreRow{}
 	for {
@@ -1205,18 +1231,30 @@ func competitionScoreHandler(c echo.Context) error {
 	); err != nil {
 		return fmt.Errorf("error Delete player_score: tenantID=%d, competitionID=%s, %w", v.tenantID, competitionID, err)
 	}
-	for _, ps := range playerScoreRows {
-		if _, err := tenantDB.NamedExecContext(
-			ctx,
-			"INSERT INTO player_score (id, tenant_id, player_id, competition_id, score, row_num, created_at, updated_at) VALUES (:id, :tenant_id, :player_id, :competition_id, :score, :row_num, :created_at, :updated_at)",
-			ps,
-		); err != nil {
-			return fmt.Errorf(
-				"error Insert player_score: id=%s, tenant_id=%d, playerID=%s, competitionID=%s, score=%d, rowNum=%d, createdAt=%d, updatedAt=%d, %w",
-				ps.ID, ps.TenantID, ps.PlayerID, ps.CompetitionID, ps.Score, ps.RowNum, ps.CreatedAt, ps.UpdatedAt, err,
-			)
 
-		}
+	if len(playerScoreRows) == 0 {
+		return c.JSON(http.StatusOK, SuccessResult{
+			Status: true,
+			Data:   ScoreHandlerResult{Rows: int64(len(playerScoreRows))},
+		})
+	}
+
+	placeholders := strings.Repeat("(?, ?, ?, ?, ?, ?, ?, ?),\n", len(playerScoreRows)-1) + "(?, ?, ?, ?, ?, ?, ?, ?)"
+	var args []interface{}
+	for _, ps := range playerScoreRows {
+		args = append(args, ps.ID)
+		args = append(args, ps.TenantID)
+		args = append(args, ps.PlayerID)
+		args = append(args, ps.CompetitionID)
+		args = append(args, ps.Score)
+		args = append(args, ps.RowNum)
+		args = append(args, ps.CreatedAt)
+		args = append(args, ps.UpdatedAt)
+	}
+	_, err = tenantDB.ExecContext(ctx, "INSERT INTO player_score (id, tenant_id, player_id, competition_id, score, row_num, created_at, updated_at) VALUES "+placeholders, args...)
+
+	if err != nil {
+		return fmt.Errorf("error Insert player_score")
 	}
 
 	return c.JSON(http.StatusOK, SuccessResult{
@@ -1246,7 +1284,6 @@ func billingHandler(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	defer tenantDB.Close()
 
 	cs := []CompetitionRow{}
 	if err := tenantDB.SelectContext(
@@ -1305,7 +1342,6 @@ func playerHandler(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	defer tenantDB.Close()
 
 	if err := authorizePlayer(ctx, tenantDB, v.playerID); err != nil {
 		return err
@@ -1383,7 +1419,7 @@ func playerHandler(c echo.Context) error {
 		return fmt.Errorf("error Select player_score: tenantID=%d, playerID=%s, %w", v.tenantID, playerID, err)
 	}
 
-	fl.Close()
+	fl.Unlock()
 
 	// psds := make([]PlayerScoreDetail, 0, len(pss))
 	// for _, ps := range pss {
@@ -1487,7 +1523,6 @@ func competitionRankingHandler(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	defer tenantDB.Close()
 
 	if err := authorizePlayer(ctx, tenantDB, v.playerID); err != nil {
 		return err
@@ -1538,7 +1573,7 @@ func competitionRankingHandler(c echo.Context) error {
 	if err != nil {
 		return fmt.Errorf("error flockByTenantID: %w", err)
 	}
-	defer fl.Close()
+	defer fl.Unlock()
 	pss := []struct {
 		TenantID      int64  `db:"tenant_id"`
 		ID            string `db:"id"`
@@ -1620,7 +1655,6 @@ func playerCompetitionsHandler(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	defer tenantDB.Close()
 
 	if err := authorizePlayer(ctx, tenantDB, v.playerID); err != nil {
 		return err
@@ -1644,7 +1678,6 @@ func organizerCompetitionsHandler(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	defer tenantDB.Close()
 
 	return competitionsHandler(c, v, tenantDB)
 }
