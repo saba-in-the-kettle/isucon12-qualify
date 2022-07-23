@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -163,7 +164,7 @@ var tenantDBMap = map[int64]*sqlx.DB{}
 var playerCache = NewCache[PlayerRow]()
 
 func bothInit() {
-	rankingCache.Flush()
+	// rankingCache.Flush()
 	tenantCache.Flush()
 	tenantCacheByName.Flush()
 	playerDetailCache.Flush()
@@ -1290,6 +1291,40 @@ func competitionScoreHandler(c echo.Context) error {
 		return fmt.Errorf("error Insert player_score")
 	}
 
+	// scoreCacheを作る
+	playerIDToLatestScores := map[string]LatestScore{}
+	for _, ps := range playerScoreRows {
+		ls, ok := playerIDToLatestScores[ps.PlayerID]
+		if !ok {
+			playerIDToLatestScores[ps.PlayerID] = LatestScore{
+				PlayerID:    ps.PlayerID,
+				PlayerScore: ps.Score,
+				RowNum:      ps.RowNum,
+			}
+			continue
+		}
+		if ls.RowNum < ps.RowNum {
+			playerIDToLatestScores[ps.PlayerID] = LatestScore{
+				PlayerID:    ps.PlayerID,
+				PlayerScore: ps.Score,
+				RowNum:      ps.RowNum,
+			}
+		}
+	}
+	latestScoreList := make([]LatestScore, 0)
+	for _, v := range playerIDToLatestScores {
+		latestScoreList = append(latestScoreList, v)
+	}
+
+	// ORDER BY score DESC, row_num ASCにする
+	sort.Slice(latestScoreList, func(i, j int) bool {
+		if latestScoreList[i].PlayerScore == latestScoreList[j].PlayerScore {
+			return latestScoreList[i].RowNum < latestScoreList[j].RowNum
+		}
+		return latestScoreList[i].PlayerScore > latestScoreList[j].PlayerScore
+	})
+	scoreCache.Set(competitionID, latestScoreList)
+
 	return c.JSON(http.StatusOK, SuccessResult{
 		Status: true,
 		Data:   ScoreHandlerResult{Rows: int64(len(playerScoreRows))},
@@ -1540,7 +1575,17 @@ type CompetitionRankingHandlerResult struct {
 // GET /api/player/competition/:competition_id/ranking
 // 大会ごとのランキングを取得する
 
-var rankingCache = NewCacheWithExpire[string, SuccessResult](2*time.Second, 2*time.Second)
+// var rankingCache = NewCacheWithExpire[string, SuccessResult](2*time.Second, 2*time.Second)
+
+type LatestScore struct {
+	PlayerID    string
+	PlayerScore int64
+	RowNum      int64
+}
+
+// competition_id -> []LatestScore
+//                   ORDER BY score DESC, row_num ASC
+var scoreCache = NewCache[[]LatestScore]()
 
 func competitionRankingHandler(c echo.Context) error {
 	ctx := context.Background()
@@ -1601,36 +1646,71 @@ func competitionRankingHandler(c echo.Context) error {
 		}
 	}
 
-	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
-	fl, err := flockByTenantID(v.tenantID)
-	if err != nil {
-		return fmt.Errorf("error flockByTenantID: %w", err)
-	}
-	defer fl.Unlock()
 	pss := []struct {
-		TenantID      int64  `db:"tenant_id"`
-		ID            string `db:"id"`
-		PlayerID      string `db:"player_id"`
-		CompetitionID string `db:"competition_id"`
-		Score         int64  `db:"score"`
-		DisplayName   string `db:"display_name"`
+		PlayerID    string `db:"player_id"`
+		Score       int64  `db:"score"`
+		DisplayName string `db:"display_name"`
 	}{}
 
-	if err := tenantDB.SelectContext(
-		ctx,
-		&pss,
-		"SELECT tmp.player_id, tmp.score, tmp.display_name FROM\n    "+
-			"(SELECT ps.player_id, max(ps.score) as score,p.display_name FROM player_score as ps\n"+
-			"    INNER JOIN player p on ps.player_id = p.id\n   "+
-			" WHERE ps.tenant_id = ? AND ps.competition_id = ?\n "+
-			"   GROUP BY ps.player_id\n    "+
-			"ORDER BY score DESC) as tmp\n  "+
-			"  INNER JOIN player_score as tps on tmp.player_id = tps.player_id and tmp.score = tps.score"+
-			" ORDER BY tmp.score DESC, tps.row_num ASC",
-		tenant.ID,
-		competitionID,
-	); err != nil {
-		return fmt.Errorf("error Select player_score: tenantID=%d, competitionID=%s, %w", tenant.ID, competitionID, err)
+	latestScores, ok := scoreCache.Get(competitionID)
+	if !ok {
+
+		// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
+		fl, err := flockByTenantID(v.tenantID)
+		if err != nil {
+			return fmt.Errorf("error flockByTenantID: %w", err)
+		}
+
+		if err := tenantDB.SelectContext(
+			ctx,
+			&pss,
+			`
+		SELECT tmp.player_id, tmp.score, tmp.display_name FROM
+			(SELECT ps.player_id, max(ps.score) as score,p.display_name FROM player_score as ps
+			INNER JOIN player p on ps.player_id = p.id
+			WHERE ps.competition_id = ?
+			GROUP BY ps.player_id
+			ORDER BY score DESC) as tmp
+			INNER JOIN player_score as tps on tmp.player_id = tps.player_id and tmp.score = tps.score
+			ORDER BY tmp.score DESC, tps.row_num ASC
+			 `,
+			competitionID,
+		); err != nil {
+			return fmt.Errorf("error Select player_score: tenantID=%d, competitionID=%s, %w", tenant.ID, competitionID, err)
+		}
+		fl.Unlock()
+	} else {
+		// scoreCacheがあった場合 (あるはず)
+		playerIDs := make([]string, 0, len(latestScores))
+		for _, ls := range latestScores {
+			playerIDs = append(playerIDs, ls.PlayerID)
+		}
+
+		query, args, err := sqlx.In(`select * FROM player WHERE id in (?)`, playerIDs)
+		if err != nil {
+			return fmt.Errorf("err sqlx.In: %w", err)
+		}
+		players := make([]PlayerRow, 0)
+		if err := tenantDB.SelectContext(ctx, &players, query, args...); err != nil {
+			return fmt.Errorf("err tenantDB.SelectContext (ランキングのscoreCacheのとこ): %w", err)
+		}
+
+		playerIDToPlayer := map[string]PlayerRow{}
+		for _, p := range players {
+			playerIDToPlayer[p.ID] = p
+		}
+
+		for _, ls := range latestScores {
+			pss = append(pss, struct {
+				PlayerID    string `db:"player_id"`
+				Score       int64  `db:"score"`
+				DisplayName string `db:"display_name"`
+			}{
+				PlayerID:    ls.PlayerID,
+				Score:       ls.PlayerScore,
+				DisplayName: playerIDToPlayer[ls.PlayerID].DisplayName,
+			})
+		}
 	}
 
 	pagedRanks := make([]CompetitionRank, 0, 100)
