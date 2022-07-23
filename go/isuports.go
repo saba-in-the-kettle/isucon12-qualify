@@ -1289,7 +1289,7 @@ func playerHandler(c echo.Context) error {
 	if err := tenantDB.SelectContext(
 		ctx,
 		&cs,
-		"SELECT * FROM competition WHERE tenant_id = ? ORDER BY created_at ASC", // index貼った
+		"SELECT * FROM competition WHERE tenant_id = ? ORDER BY created_at ASC", // index貼った // TODO: IDだけでよさそう
 		v.tenantID,
 	); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("error Select competition: %w", err)
@@ -1301,26 +1301,44 @@ func playerHandler(c echo.Context) error {
 		return fmt.Errorf("error flockByTenantID: %w", err)
 	}
 	defer fl.Close()
-	pss := make([]PlayerScoreRow, 0, len(cs))
-	// TODO: N+1
+
+	cIDs := make([]string, 0, len(cs))
 	for _, c := range cs {
-		ps := PlayerScoreRow{}
-		if err := tenantDB.GetContext(
-			ctx,
-			&ps,
-			// 最後にCSVに登場したスコアを採用する = row_numが一番大きいもの
-			"SELECT * FROM player_score WHERE tenant_id = ? AND competition_id = ? AND player_id = ? ORDER BY row_num DESC LIMIT 1", // index 貼った
-			v.tenantID,
-			c.ID,
-			playerID,
-		); err != nil {
-			// 行がない = スコアが記録されてない
-			if errors.Is(err, sql.ErrNoRows) {
-				continue
-			}
-			return fmt.Errorf("error Select player_score: tenantID=%d, competitionID=%s, playerID=%s, %w", v.tenantID, c.ID, playerID, err)
-		}
-		pss = append(pss, ps)
+		cIDs = append(cIDs, c.ID)
+	}
+
+	// pss := make([]PlayerScoreRow, 0, len(cs))
+	// // TODO: N+1
+	// for _, c := range cs {
+	// 	ps := PlayerScoreRow{}
+	// 	if err := tenantDB.GetContext(
+	// 		ctx,
+	// 		&ps,
+	// 		// 最後にCSVに登場したスコアを採用する = row_numが一番大きいもの
+	// 		"SELECT * FROM player_score WHERE tenant_id = ? AND competition_id = ? AND player_id = ? ORDER BY row_num DESC LIMIT 1", // index 貼った
+	// 		v.tenantID,
+	// 		c.ID,
+	// 		playerID,
+	// 	); err != nil {
+	// 		// 行がない = スコアが記録されてない
+	// 		if errors.Is(err, sql.ErrNoRows) {
+	// 			continue
+	// 		}
+	// 		return fmt.Errorf("error Select player_score: tenantID=%d, competitionID=%s, playerID=%s, %w", v.tenantID, c.ID, playerID, err)
+	// 	}
+	// 	pss = append(pss, ps)
+	// }
+
+	pss := make([]PlayerScoreRow, 0, len(cs))
+	if err := tenantDB.GetContext(
+		ctx,
+		&pss,
+		// TODO: indexを貼る
+		"select tenant_id, id, player_id, competition_id, score, max(row_num) as row_num, created_at, updated_at from player_score where player_id = ? and competition_id in (?) group by competition_id",
+		playerID,
+		cIDs,
+	); err != nil {
+		return fmt.Errorf("error Select player_score: tenantID=%d, competitionID=%v, playerID=%s, %w", v.tenantID, cIDs, playerID, err)
 	}
 
 	// TODO: N+1 (INでよさそう)
