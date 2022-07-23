@@ -160,6 +160,7 @@ func (j *JSONSerializer) Deserialize(c echo.Context, i interface{}) error {
 var tenantCache = NewCache[TenantRow]()
 var tenantCacheByName = NewCache[TenantRow]()
 var mutexMap = NewCache[*sync.Mutex]()
+var bililngCache = NewCache[*BillingReport]()
 
 func bothInit() {
 	rankingCache.Flush()
@@ -167,6 +168,7 @@ func bothInit() {
 	tenantCacheByName.Flush()
 	playerDetailCache.Flush()
 	mutexMap.Flush()
+	bililngCache.Flush()
 
 	var tennants []TenantRow
 
@@ -642,6 +644,11 @@ func billingReportByCompetition(ctx context.Context, tenantDB dbOrTx, tenantID i
 		return nil, fmt.Errorf("error retrieveCompetition: %w", err)
 	}
 
+	cached, ok := bililngCache.Get(competitonID)
+	if ok {
+		return cached, nil
+	}
+
 	if !comp.FinishedAt.Valid {
 		return &BillingReport{
 			CompetitionID:    comp.ID,
@@ -704,7 +711,8 @@ func billingReportByCompetition(ctx context.Context, tenantDB dbOrTx, tenantID i
 			}
 		}
 	}
-	return &BillingReport{
+
+	report := &BillingReport{
 		CompetitionID:     comp.ID,
 		CompetitionTitle:  comp.Title,
 		PlayerCount:       playerCount,
@@ -712,7 +720,13 @@ func billingReportByCompetition(ctx context.Context, tenantDB dbOrTx, tenantID i
 		BillingPlayerYen:  100 * playerCount, // スコアを登録した参加者は100円
 		BillingVisitorYen: 10 * visitorCount, // ランキングを閲覧だけした(スコアを登録していない)参加者は10円
 		BillingYen:        100*playerCount + 10*visitorCount,
-	}, nil
+	}
+
+	if comp.FinishedAt.Valid {
+		bililngCache.Set(comp.ID, report)
+	}
+
+	return report, nil
 }
 
 type TenantWithBilling struct {
