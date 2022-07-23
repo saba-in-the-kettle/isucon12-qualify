@@ -167,8 +167,26 @@ func (j *JSONSerializer) Deserialize(c echo.Context, i interface{}) error {
 	return err
 }
 
+var tenantCache = NewCache[TenantRow]()
+var tenantCacheByName = NewCache[TenantRow]()
+
 func bothInit() {
 	rankingCache.Flush()
+	tenantCache.Flush()
+	tenantCacheByName.Flush()
+	playerDetailCache.Flush()
+
+	var tennants []TenantRow
+
+	err := adminDB.Select(&tennants, "SELECT * FROM tenants")
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, tenant := range tennants {
+		tenantCache.Set(fmt.Sprintf("%d", tenant.ID), tenant)
+		tenantCache.Set(tenant.Name, tenant)
+	}
+
 }
 
 // Run は cmd/isuports/main.go から呼ばれるエントリーポイントです
@@ -178,7 +196,7 @@ func Run() {
 	e.Logger.SetLevel(log.DEBUG)
 	e.JSONSerializer = &JSONSerializer{}
 
-	playerDetailCache.Flush()
+	bothInit()
 
 	var (
 		sqlLogger io.Closer
@@ -382,13 +400,9 @@ func retrieveTenantRowFromHeader(c echo.Context) (*TenantRow, error) {
 
 	// テナントの存在確認
 	var tenant TenantRow
-	if err := adminDB.GetContext(
-		context.Background(),
-		&tenant,
-		"SELECT * FROM tenant WHERE name = ?",
-		tenantName,
-	); err != nil {
-		return nil, fmt.Errorf("failed to Select tenant: name=%s, %w", tenantName, err)
+	tenant, ok := tenantCacheByName.Get(tenantName)
+	if !ok {
+		return nil, fmt.Errorf("failed to Select tenant: name=%s, %w", tenantName, sql.ErrNoRows)
 	}
 	return &tenant, nil
 }
@@ -488,6 +502,18 @@ func flockByTenantID(tenantID int64) (io.Closer, error) {
 	return fl, nil
 }
 
+// 排他ロックする
+// TODO: ファイルをGoでロックしてるのが気になる
+func flockByTenantIDComp(tenantID int64, competitionID string) (io.Closer, error) {
+	p := lockFilePath(tenantID)
+
+	fl := flock.New(p)
+	if err := fl.Lock(); err != nil {
+		return nil, fmt.Errorf("error flock.Lock: path=%s, %w", p, err)
+	}
+	return fl, nil
+}
+
 type TenantsAddHandlerResult struct {
 	Tenant TenantWithBilling `json:"tenant"`
 }
@@ -553,6 +579,18 @@ func tenantsAddHandler(c echo.Context) error {
 			BillingYen:  0,
 		},
 	}
+
+	row := TenantRow{
+		ID:          id,
+		Name:        name,
+		DisplayName: displayName,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+
+	tenantCache.Set(strconv.FormatInt(id, 10), row)
+	tenantCacheByName.Set(row.Name, row)
+
 	return c.JSON(http.StatusOK, SuccessResult{Status: true, Data: res})
 }
 
@@ -615,7 +653,7 @@ func billingReportByCompetition(ctx context.Context, tenantDB dbOrTx, tenantID i
 	}
 
 	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
-	fl, err := flockByTenantID(tenantID)
+	fl, err := flockByTenantIDComp(tenantID, competitonID)
 	if err != nil {
 		return nil, fmt.Errorf("error flockByTenantID: %w", err)
 	}
@@ -708,14 +746,12 @@ func tenantsBillingHandler(c echo.Context) error {
 	//   を合計したものを
 	// テナントの課金とする
 	ts := []TenantRow{}
-	if err := adminDB.SelectContext(ctx, &ts, "SELECT * FROM tenant ORDER BY id DESC"); err != nil {
+	if err := adminDB.SelectContext(ctx, &ts, "SELECT * FROM tenant WHERE id < ? ORDER BY id DESC LIMIT 10", beforeID); err != nil {
 		return fmt.Errorf("error Select tenant: %w", err)
 	}
 	tenantBillings := make([]TenantWithBilling, 0, len(ts))
+
 	for _, t := range ts {
-		if beforeID != 0 && beforeID <= t.ID {
-			continue
-		}
 		err := func(t TenantRow) error {
 			tb := TenantWithBilling{
 				ID:          strconv.FormatInt(t.ID, 10),
@@ -731,7 +767,7 @@ func tenantsBillingHandler(c echo.Context) error {
 			if err := tenantDB.SelectContext(
 				ctx,
 				&cs,
-				"SELECT * FROM competition WHERE tenant_id=?",
+				"SELECT id FROM competition WHERE tenant_id=?",
 				t.ID,
 			); err != nil {
 				return fmt.Errorf("failed to Select competition: %w", err)
@@ -748,9 +784,6 @@ func tenantsBillingHandler(c echo.Context) error {
 		}(t)
 		if err != nil {
 			return err
-		}
-		if len(tenantBillings) >= 10 {
-			break
 		}
 	}
 	return c.JSON(http.StatusOK, SuccessResult{
@@ -1420,8 +1453,9 @@ func competitionRankingHandler(c echo.Context) error {
 	}
 
 	now := time.Now().Unix()
-	var tenant TenantRow
-	if err := adminDB.GetContext(ctx, &tenant, "SELECT * FROM tenant WHERE id = ?", v.tenantID); err != nil {
+
+	tenant, ok := tenantCache.Get(fmt.Sprintf("%d", v.tenantID))
+	if !ok {
 		return fmt.Errorf("error Select tenant: id=%d, %w", v.tenantID, err)
 	}
 
@@ -1445,7 +1479,7 @@ func competitionRankingHandler(c echo.Context) error {
 	}
 
 	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
-	fl, err := flockByTenantID(v.tenantID)
+	fl, err := flockByTenantIDComp(v.tenantID, competitionID)
 	if err != nil {
 		return fmt.Errorf("error flockByTenantID: %w", err)
 	}
@@ -1687,7 +1721,8 @@ type InitializeHandlerResult struct {
 // ベンチマーカーが起動したときに最初に呼ぶ
 // データベースの初期化などが実行されるため、スキーマを変更した場合などは適宜改変すること
 func initializeHandler(c echo.Context) error {
-	playerDetailCache.Flush()
+	bothInit()
+
 	out, err := exec.Command(initializeScript).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("error exec.Command: %s %e", string(out), err)
