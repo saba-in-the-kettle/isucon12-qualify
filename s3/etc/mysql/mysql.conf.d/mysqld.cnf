@@ -23,8 +23,8 @@ user		= mysql
 
 
 max_connections=10000
-innodb_buffer_pool_size = 2.5G # メモリの75%程度を指定
-innodb_flush_log_at_trx_commit = 0
+innodb_buffer_pool_size = 25000M # メモリの75%程度を指定
+innodb_flush_log_at_trx_commit = 2
 innodb_flush_method = O_DIRECT
 
 # If MySQL is running as a replication slave, this should be
