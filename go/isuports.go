@@ -160,6 +160,7 @@ var tenantCacheByName = NewCache[TenantRow]()
 var mutexMap = NewCache[*sync.Mutex]()
 var bililngCache = NewCache[*BillingReport]()
 var tenantDBMap = map[int64]*sqlx.DB{}
+var playerCache = NewCache[PlayerRow]()
 
 func bothInit() {
 	rankingCache.Flush()
@@ -168,6 +169,7 @@ func bothInit() {
 	playerDetailCache.Flush()
 	mutexMap.Flush()
 	bililngCache.Flush()
+	playerCache.Flush()
 
 	for _, db := range tenantDBMap {
 		db.Close()
@@ -183,6 +185,19 @@ func bothInit() {
 	for _, tenant := range tennants {
 		tenantCache.Set(fmt.Sprintf("%d", tenant.ID), tenant)
 		tenantCacheByName.Set(tenant.Name, tenant)
+
+		var players []PlayerRow
+		db, err := connectToTenantDB(tenant.ID)
+		if err != nil {
+			log.Fatal(err)
+		}
+		err = db.Select(&players, "SELECT * FROM player")
+		if err != nil {
+			log.Fatal()
+		}
+		for _, player := range players {
+			playerCache.Set(fmt.Sprintf("%d-%s", tenant.ID, player.ID), player)
+		}
 	}
 
 }
@@ -431,6 +446,11 @@ type PlayerRow struct {
 // 参加者を取得する
 func retrievePlayer(ctx context.Context, tenantDB dbOrTx, id string) (*PlayerRow, error) {
 	var p PlayerRow
+	cached, ok := playerCache.Get(id)
+	if ok {
+		return &cached, nil
+	}
+
 	if err := tenantDB.GetContext(ctx, &p, "SELECT * FROM player WHERE id = ?", id); err != nil {
 		return nil, fmt.Errorf("error Select player: id=%s, %w", id, err)
 	}
@@ -938,6 +958,15 @@ func playersAddHandler(c echo.Context) error {
 				id, displayName, false, now, now, err,
 			)
 		}
+
+		playerCache.Set(fmt.Sprintf("%d-%s", v.tenantID, id), PlayerRow{
+			TenantID:       v.tenantID,
+			ID:             id,
+			DisplayName:    displayName,
+			IsDisqualified: false,
+			CreatedAt:      now,
+			UpdatedAt:      now,
+		})
 		p, err := retrievePlayer(ctx, tenantDB, id)
 		if err != nil {
 			return fmt.Errorf("error retrievePlayer: %w", err)
@@ -1460,7 +1489,7 @@ func playerHandler(c echo.Context) error {
 	}
 	competitionRows := make([]CompetitionRow, 0, len(pss))
 	query2, args2, err := sqlx.In(`
-	SELECT * FROM competition WHERE id in (?)
+	SELECT id, title FROM competition WHERE id in (?)
 	`, cIDs)
 	if err != nil {
 		return fmt.Errorf("err sqlx.In: %w", err)
@@ -1813,12 +1842,14 @@ type InitializeHandlerResult struct {
 // ベンチマーカーが起動したときに最初に呼ぶ
 // データベースの初期化などが実行されるため、スキーマを変更した場合などは適宜改変すること
 func initializeHandler(c echo.Context) error {
-	bothInit()
 
 	out, err := exec.Command(initializeScript).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("error exec.Command: %s %e", string(out), err)
 	}
+
+	bothInit()
+
 	res := InitializeHandlerResult{
 		Lang: "go",
 	}
