@@ -6,7 +6,6 @@ import (
 	"encoding/csv"
 	"errors"
 	"fmt"
-	"github.com/kaz/pprotein/integration/echov4"
 	"io"
 	"net/http"
 	"os"
@@ -18,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kaz/pprotein/integration/echov4"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/gofrs/flock"
@@ -68,7 +69,20 @@ func connectAdminDB() (*sqlx.DB, error) {
 	config.DBName = getEnv("ISUCON_DB_NAME", "isuports")
 	config.ParseTime = true
 	dsn := config.FormatDSN()
-	return sqlx.Open("mysql", dsn)
+	db, err := sqlx.Open("mysql", dsn)
+	if err != nil {
+		return nil, err
+	}
+	// 再起動試験対策
+	for {
+		err := db.Ping()
+		if err == nil {
+			break
+		}
+		log.Print(err)
+		time.Sleep(time.Second * 1)
+	}
+	return db, nil
 }
 
 // テナントDBのパスを返す
