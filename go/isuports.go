@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -152,12 +153,14 @@ func (j *JSONSerializer) Deserialize(c echo.Context, i interface{}) error {
 
 var tenantCache = NewCache[TenantRow]()
 var tenantCacheByName = NewCache[TenantRow]()
+var mutexMap = NewCache[*sync.Mutex]()
 
 func bothInit() {
 	rankingCache.Flush()
 	tenantCache.Flush()
 	tenantCacheByName.Flush()
 	playerDetailCache.Flush()
+	mutexMap.Flush()
 
 	var tennants []TenantRow
 
@@ -483,14 +486,18 @@ func lockFilePath(id int64) string {
 
 // 排他ロックする
 // TODO: ファイルをGoでロックしてるのが気になる
-func flockByTenantID(tenantID int64) (io.Closer, error) {
-	p := lockFilePath(tenantID)
+func flockByTenantID(tenantID int64) (*sync.Mutex, error) {
+	m, ok := mutexMap.Get(fmt.Sprintf("%d", tenantID))
 
-	fl := flock.New(p)
-	if err := fl.Lock(); err != nil {
-		return nil, fmt.Errorf("error flock.Lock: path=%s, %w", p, err)
+	if ok {
+		m.Lock()
+		return m, nil
+	} else {
+		newM := &sync.Mutex{}
+		newM.Lock()
+		mutexMap.Set(fmt.Sprintf("%d", tenantID), newM)
+		return newM, nil
 	}
-	return fl, nil
 }
 
 // 排他ロックする
@@ -654,7 +661,7 @@ func billingReportByCompetition(ctx context.Context, tenantDB dbOrTx, tenantID i
 	if err != nil {
 		return nil, fmt.Errorf("error flockByTenantID: %w", err)
 	}
-	defer fl.Close()
+	defer fl.Unlock()
 
 	// スコアを登録した参加者のIDを取得する
 	scoredPlayerIDs := []string{}
@@ -1138,7 +1145,7 @@ func competitionScoreHandler(c echo.Context) error {
 	if err != nil {
 		return fmt.Errorf("error flockByTenantID: %w", err)
 	}
-	defer fl.Close()
+	defer fl.Unlock()
 	var rowNum int64
 	playerScoreRows := []PlayerScoreRow{}
 	for {
@@ -1381,7 +1388,7 @@ func playerHandler(c echo.Context) error {
 		return fmt.Errorf("error Select player_score: tenantID=%d, competitionID=%v, playerID=%s, %w", v.tenantID, cIDs, playerID, err)
 	}
 
-	fl.Close()
+	fl.Unlock()
 
 	// psds := make([]PlayerScoreDetail, 0, len(pss))
 	// for _, ps := range pss {
@@ -1516,7 +1523,7 @@ func competitionRankingHandler(c echo.Context) error {
 	if err != nil {
 		return fmt.Errorf("error flockByTenantID: %w", err)
 	}
-	defer fl.Close()
+	defer fl.Unlock()
 	pss := []struct {
 		TenantID      int64  `db:"tenant_id"`
 		ID            string `db:"id"`
