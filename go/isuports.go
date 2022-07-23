@@ -180,7 +180,7 @@ func bothInit() {
 
 	var tennants []TenantRow
 
-	err := adminDB.Select(&tennants, "SELECT * FROM tenants")
+	err := adminDB.Select(&tennants, "SELECT * FROM tenant")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -197,8 +197,6 @@ func Run() {
 	e.Debug = false
 	e.Logger.SetLevel(log.DEBUG)
 	e.JSONSerializer = &JSONSerializer{}
-
-	bothInit()
 
 	var (
 		sqlLogger io.Closer
@@ -259,6 +257,8 @@ func Run() {
 	adminDB.SetMaxIdleConns(200)
 
 	defer adminDB.Close()
+
+	bothInit()
 
 	port := getEnv("SERVER_APP_PORT", "3000")
 	e.Logger.Infof("starting isuports server on : %s ...", port)
@@ -1379,26 +1379,57 @@ func playerHandler(c echo.Context) error {
 	// }
 
 	pss := make([]PlayerScoreRow, 0, len(cs))
-	if err := tenantDB.GetContext(
+
+	// TODO: indexを貼る
+	query1, args1, err := sqlx.In(`
+	select tenant_id, id, player_id, competition_id, score, max(row_num) as row_num, created_at, updated_at from player_score where player_id = ? and competition_id in (?) group by competition_id
+	`, playerID, cIDs)
+	if err != nil {
+		return fmt.Errorf("err sqlx.In: %w", err)
+	}
+	if err := tenantDB.SelectContext(
 		ctx,
 		&pss,
-		// TODO: indexを貼る
-		"select tenant_id, id, player_id, competition_id, score, max(row_num) as row_num, created_at, updated_at from player_score where player_id = ? and competition_id in (?) group by competition_id",
-		playerID,
-		cIDs,
+		query1, args1...,
 	); err != nil {
 		return fmt.Errorf("error Select player_score: tenantID=%d, competitionID=%v, playerID=%s, %w", v.tenantID, cIDs, playerID, err)
 	}
 
-	// TODO: N+1 (INでよさそう)
+	fl.Unlock()
+
+	// psds := make([]PlayerScoreDetail, 0, len(pss))
+	// for _, ps := range pss {
+	// 	comp, err := retrieveCompetition(ctx, tenantDB, ps.CompetitionID)
+	// 	if err != nil {
+	// 		return fmt.Errorf("error retrieveCompetition: %w", err)
+	// 	}
+	// 	psds = append(psds, PlayerScoreDetail{
+	// 		CompetitionTitle: comp.Title,
+	// 		Score:            ps.Score,
+	// 	})
+	// }
+
+	competitionRows := make([]CompetitionRow, 0, len(pss))
+
+	query2, args2, err := sqlx.In(`
+	SELECT * FROM competition WHERE id in (?)
+	`, cIDs)
+	if err != nil {
+		return fmt.Errorf("err sqlx.In: %w", err)
+	}
+	if err := tenantDB.SelectContext(ctx, &competitionRows, query2, args2...); err != nil {
+		return fmt.Errorf("error tenantDB.SelectContext: %w", err)
+	}
+
+	cIDToCompetition := map[string]CompetitionRow{}
+	for _, c := range competitionRows {
+		cIDToCompetition[c.ID] = c
+	}
 	psds := make([]PlayerScoreDetail, 0, len(pss))
 	for _, ps := range pss {
-		comp, err := retrieveCompetition(ctx, tenantDB, ps.CompetitionID)
-		if err != nil {
-			return fmt.Errorf("error retrieveCompetition: %w", err)
-		}
+		c := cIDToCompetition[ps.CompetitionID]
 		psds = append(psds, PlayerScoreDetail{
-			CompetitionTitle: comp.Title,
+			CompetitionTitle: c.Title,
 			Score:            ps.Score,
 		})
 	}
