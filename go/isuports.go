@@ -174,6 +174,8 @@ func Run() {
 	e.Logger.SetLevel(log.DEBUG)
 	e.JSONSerializer = &JSONSerializer{}
 
+	playerCache.Flush()
+
 	var (
 		sqlLogger io.Closer
 		err       error
@@ -1230,6 +1232,8 @@ type PlayerHandlerResult struct {
 	Scores []PlayerScoreDetail `json:"scores"`
 }
 
+var playerCache = NewCacheWithExpire[string, PlayerHandlerResult](3*time.Second, 3*time.Second)
+
 // 参加者向けAPI
 // GET /api/player/player/:player_id
 // 参加者の詳細情報を取得する
@@ -1258,6 +1262,19 @@ func playerHandler(c echo.Context) error {
 	if playerID == "" {
 		return echo.NewHTTPError(http.StatusBadRequest, "player_id is required")
 	}
+
+	cacheKey := strconv.Itoa(int(v.tenantID)) + "/" + playerID
+	{
+		phresult, ok := playerCache.Get(cacheKey)
+		if ok {
+			res := SuccessResult{
+				Status: true,
+				Data:   phresult,
+			}
+			return c.JSON(http.StatusOK, res)
+		}
+	}
+
 	p, err := retrievePlayer(ctx, tenantDB, playerID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -1316,16 +1333,19 @@ func playerHandler(c echo.Context) error {
 		})
 	}
 
+	phresult := PlayerHandlerResult{
+		Player: PlayerDetail{
+			ID:             p.ID,
+			DisplayName:    p.DisplayName,
+			IsDisqualified: p.IsDisqualified,
+		},
+		Scores: psds,
+	}
+	playerCache.Set(cacheKey, phresult)
+
 	res := SuccessResult{
 		Status: true,
-		Data: PlayerHandlerResult{
-			Player: PlayerDetail{
-				ID:             p.ID,
-				DisplayName:    p.DisplayName,
-				IsDisqualified: p.IsDisqualified,
-			},
-			Scores: psds,
-		},
+		Data:   phresult,
 	}
 	return c.JSON(http.StatusOK, res)
 }
@@ -1666,6 +1686,7 @@ type InitializeHandlerResult struct {
 // ベンチマーカーが起動したときに最初に呼ぶ
 // データベースの初期化などが実行されるため、スキーマを変更した場合などは適宜改変すること
 func initializeHandler(c echo.Context) error {
+	playerCache.Flush()
 	out, err := exec.Command(initializeScript).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("error exec.Command: %s %e", string(out), err)
