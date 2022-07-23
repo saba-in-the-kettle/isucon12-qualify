@@ -22,6 +22,11 @@ user		= mysql
 # datadir	= /var/lib/mysql
 
 
+max_connections=10000
+innodb_buffer_pool_size = 25000M # メモリの75%程度を指定
+innodb_flush_log_at_trx_commit = 2
+innodb_flush_method = O_DIRECT
+
 # If MySQL is running as a replication slave, this should be
 # changed. Ref https://dev.mysql.com/doc/refman/8.0/en/server-system-variables.html#sysvar_tmpdir
 # tmpdir		= /tmp
@@ -74,7 +79,6 @@ log_error = /var/log/mysql/error.log
 # log_bin			= /var/log/mysql/mysql-bin.log
 # binlog_expire_logs_seconds	= 2592000
 disable-log-bin
-innodb_flush_log_at_trx_commit = 0
 max_binlog_size   = 100M
 # binlog_do_db		= include_database_name
 # binlog_ignore_db	= include_database_name
