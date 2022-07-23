@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/goccy/go-json"
-	"github.com/google/uuid"
 
 	"github.com/kaz/pprotein/integration/echov4"
 
@@ -53,7 +52,7 @@ var (
 
 	sqliteDriverName             = "sqlite3"
 	auto_increment_id      int64 = 0
-	auto_increment_id_base       = uuid.NewString()
+	auto_increment_id_base       = strconv.FormatInt(time.Now().Unix(), 10)
 )
 
 // 環境変数を取得する、なければデフォルト値を返す
@@ -121,7 +120,7 @@ func createTenantDB(id int64) error {
 // システム全体で一意なIDを生成する
 func dispenseID(ctx context.Context) (string, error) {
 	newId := atomic.AddInt64(&auto_increment_id, 1)
-	return fmt.Sprintf("%d-%s", newId, &auto_increment_id_base), nil
+	return fmt.Sprintf("%d%s", newId, auto_increment_id_base), nil
 }
 
 // TODO(p1ass) これ消したい
