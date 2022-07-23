@@ -1,6 +1,6 @@
 #! /bin/bash
 
-SERVER=s1
+SERVER=s2
 
 for f in `find * -type f`
 do

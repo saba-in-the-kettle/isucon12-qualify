@@ -41,6 +41,7 @@ deploy-sql:
 	@ for s in s1 s2 s3; do\
 		$(START_ECHO);\
 		scp sql/init.sh $$s:~/webapp/sql/init.sh;\
+		ssh $$s "chmod +x ~/webapp/sql/init.sh";\
 		scp sql/init.sql $$s:~/webapp/sql/init.sql;\
 		scp sql/init.sql $$s:~/webapp/sql/sqlite3-to-sql;\
 		scp -r sql/admin $$s:~/webapp/sql/admin;\
