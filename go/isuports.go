@@ -1328,6 +1328,7 @@ func competitionScoreHandler(c echo.Context) error {
 		}
 		return latestScoreList[i].PlayerScore > latestScoreList[j].PlayerScore
 	})
+	c.Logger().Infof("scoreCacheをセット competitionID: %s, len(latestScoreList) = %d", competitionID, len(latestScoreList))
 	scoreCache.Set(competitionID, latestScoreList)
 
 	return c.JSON(http.StatusOK, SuccessResult{
@@ -1657,9 +1658,8 @@ func competitionRankingHandler(c echo.Context) error {
 		DisplayName string `db:"display_name"`
 	}{}
 
-	latestScores, ok := scoreCache.Get(competitionID)
+	latestScores, ok := scoreCache.Get(competition.ID)
 	if !ok {
-
 		// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
 		fl, err := flockByTenantID(v.tenantID)
 		if err != nil {
@@ -1685,6 +1685,7 @@ func competitionRankingHandler(c echo.Context) error {
 		}
 		fl.Unlock()
 	} else {
+		c.Logger().Infof("scoreCache hit: competitionID: %s", competition.ID)
 		// scoreCacheがあった場合 (あるはず)
 		playerIDs := make([]string, 0, len(latestScores))
 		for _, ls := range latestScores {
