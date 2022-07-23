@@ -505,13 +505,19 @@ func flockByTenantID(tenantID int64) (io.Closer, error) {
 // 排他ロックする
 // TODO: ファイルをGoでロックしてるのが気になる
 func flockByTenantIDComp(tenantID int64, competitionID string) (io.Closer, error) {
-	p := lockFilePath(tenantID)
+	p := lockFilePathComp(tenantID, competitionID)
 
 	fl := flock.New(p)
 	if err := fl.Lock(); err != nil {
 		return nil, fmt.Errorf("error flock.Lock: path=%s, %w", p, err)
 	}
 	return fl, nil
+}
+
+// 排他ロックのためのファイル名を生成する
+func lockFilePathComp(id int64, comoetitionID string) string {
+	tenantDBDir := getEnv("ISUCON_TENANT_DB_DIR", "../tenant_db")
+	return filepath.Join(tenantDBDir, fmt.Sprintf("%d-%s.lock", id, comoetitionID))
 }
 
 type TenantsAddHandlerResult struct {
