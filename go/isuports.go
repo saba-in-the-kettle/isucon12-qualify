@@ -118,7 +118,7 @@ func createTenantDB(id int64) error {
 func dispenseID(ctx context.Context) (string, error) {
 	var id int64
 	var lastErr error
-	for i := 0; i < 100; i++ {
+	for i := 0; i < 1; i++ {
 		var ret sql.Result
 		ret, err := adminDB.ExecContext(ctx, "REPLACE INTO id_generator (stub) VALUES (?);", "a")
 		if err != nil {
