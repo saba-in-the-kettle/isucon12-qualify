@@ -6,6 +6,7 @@ import (
 	"encoding/csv"
 	"errors"
 	"fmt"
+	"github.com/kaz/pprotein/integration/echov4"
 	"io"
 	"net/http"
 	"os"
@@ -137,6 +138,8 @@ func Run() {
 	e.Debug = true
 	e.Logger.SetLevel(log.DEBUG)
 
+	echov4.EnableDebugHandler(e)
+
 	var (
 		sqlLogger io.Closer
 		err       error
@@ -151,7 +154,7 @@ func Run() {
 	}
 	defer sqlLogger.Close()
 
-	e.Use(middleware.Logger())
+	// e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
 	e.Use(SetCacheControlPrivate)
 
