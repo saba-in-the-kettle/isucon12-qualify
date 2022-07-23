@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1281,7 +1282,19 @@ func competitionScoreHandler(c echo.Context) error {
 			}
 		}
 	}
-	scoreCache.Set(competitionID, playerIDToLatestScores)
+	latestScoreList := make([]LatestScore, 0)
+	for _, v := range playerIDToLatestScores {
+		latestScoreList = append(latestScoreList, v)
+	}
+
+	// ORDER BY score DESC, row_num ASCにする
+	sort.Slice(latestScoreList, func(i, j int) bool {
+		if latestScoreList[i].PlayerScore == latestScoreList[j].PlayerScore {
+			return latestScoreList[i].RowNum < latestScoreList[j].RowNum
+		}
+		return latestScoreList[i].PlayerScore > latestScoreList[j].PlayerScore
+	})
+	scoreCache.Set(competitionID, latestScoreList)
 
 	return c.JSON(http.StatusOK, SuccessResult{
 		Status: true,
@@ -1541,9 +1554,9 @@ type LatestScore struct {
 	RowNum      int64
 }
 
-// competition_id -> map[string]LatestScore
-//                   playerID -> LatestScore
-var scoreCache = NewCache[map[string]LatestScore]()
+// competition_id -> []LatestScore
+//                   ORDER BY score DESC, row_num ASC
+var scoreCache = NewCache[[]LatestScore]()
 
 func competitionRankingHandler(c echo.Context) error {
 	ctx := context.Background()
@@ -1604,12 +1617,6 @@ func competitionRankingHandler(c echo.Context) error {
 		}
 	}
 
-	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
-	fl, err := flockByTenantID(v.tenantID)
-	if err != nil {
-		return fmt.Errorf("error flockByTenantID: %w", err)
-	}
-	defer fl.Unlock()
 	pss := []struct {
 		PlayerID    string `db:"player_id"`
 		Score       int64  `db:"score"`
@@ -1619,6 +1626,13 @@ func competitionRankingHandler(c echo.Context) error {
 	latestScores, ok := scoreCache.Get(competitionID)
 	if !ok {
 		c.Logger().Infof("ランキングでキャッシュ使えてないっすね competitionID: %s", competitionID)
+
+		// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
+		fl, err := flockByTenantID(v.tenantID)
+		if err != nil {
+			return fmt.Errorf("error flockByTenantID: %w", err)
+		}
+
 		if err := tenantDB.SelectContext(
 			ctx,
 			&pss,
@@ -1636,6 +1650,7 @@ func competitionRankingHandler(c echo.Context) error {
 		); err != nil {
 			return fmt.Errorf("error Select player_score: tenantID=%d, competitionID=%s, %w", tenant.ID, competitionID, err)
 		}
+		fl.Unlock()
 	} else {
 		// scoreCacheがあった場合 (あるはず)
 		playerIDs := make([]string, 0, len(latestScores))
@@ -1652,19 +1667,20 @@ func competitionRankingHandler(c echo.Context) error {
 			return fmt.Errorf("err tenantDB.SelectContext (ランキングのscoreCacheのとこ): %w", err)
 		}
 
+		playerIDToPlayer := map[string]PlayerRow{}
 		for _, p := range players {
-			latestScore, ok := latestScores[p.ID]
-			if !ok {
-				return fmt.Errorf("failed to find latestScores[p.ID]: player id: %s", p.ID)
-			}
+			playerIDToPlayer[p.ID] = p
+		}
+
+		for _, ls := range latestScores {
 			pss = append(pss, struct {
 				PlayerID    string `db:"player_id"`
 				Score       int64  `db:"score"`
 				DisplayName string `db:"display_name"`
 			}{
-				PlayerID:    p.ID,
-				Score:       latestScore.PlayerScore,
-				DisplayName: p.DisplayName,
+				PlayerID:    ls.PlayerID,
+				Score:       ls.PlayerScore,
+				DisplayName: playerIDToPlayer[ls.PlayerID].DisplayName,
 			})
 		}
 	}
