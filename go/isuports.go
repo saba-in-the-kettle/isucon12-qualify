@@ -18,6 +18,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/goccy/go-json"
+
 	"github.com/kaz/pprotein/integration/echov4"
 
 	"github.com/go-sql-driver/mysql"
@@ -146,11 +148,30 @@ func SetCacheControlPrivate(next echo.HandlerFunc) echo.HandlerFunc {
 	}
 }
 
+// JSONSerializer を入れ替える
+// https://twitter.com/fujiwara/status/1440211187581341699
+type JSONSerializer struct{}
+
+func (j *JSONSerializer) Serialize(c echo.Context, i interface{}, indent string) error {
+	enc := json.NewEncoder(c.Response())
+	return enc.Encode(i)
+}
+func (j *JSONSerializer) Deserialize(c echo.Context, i interface{}) error {
+	err := json.NewDecoder(c.Request().Body).Decode(i)
+	if ute, ok := err.(*json.UnmarshalTypeError); ok {
+		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("Unmarshal type error: expected=%v, got=%v, field=%v, offset=%v", ute.Type, ute.Value, ute.Field, ute.Offset)).SetInternal(err)
+	} else if se, ok := err.(*json.SyntaxError); ok {
+		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("Syntax error: offset=%v, error=%v", se.Offset, se.Error())).SetInternal(err)
+	}
+	return err
+}
+
 // Run は cmd/isuports/main.go から呼ばれるエントリーポイントです
 func Run() {
 	e := echo.New()
 	e.Debug = false
 	e.Logger.SetLevel(log.DEBUG)
+	e.JSONSerializer = &JSONSerializer{}
 
 	var (
 		sqlLogger io.Closer
@@ -172,21 +193,22 @@ func Run() {
 
 	// SaaS管理者向けAPI
 	e.POST("/api/admin/tenants/add", tenantsAddHandler)
-	e.GET("/api/admin/tenants/billing", tenantsBillingHandler)
+	e.GET("/api/admin/tenants/billing", tenantsBillingHandler) // 3秒待てるのでキャッシュしてもよさそう
 
 	// テナント管理者向けAPI - 参加者追加、一覧、失格
 	e.GET("/api/organizer/players", playersListHandler)
 	e.POST("/api/organizer/players/add", playersAddHandler)
-	e.POST("/api/organizer/player/:player_id/disqualified", playerDisqualifiedHandler)
+	e.POST("/api/organizer/player/:player_id/disqualified", playerDisqualifiedHandler) // 3秒待てるのでキャッシュしてもよさそう
 
 	// テナント管理者向けAPI - 大会管理
 	e.POST("/api/organizer/competitions/add", competitionsAddHandler)
 	e.POST("/api/organizer/competition/:competition_id/finish", competitionFinishHandler)
 	e.POST("/api/organizer/competition/:competition_id/score", competitionScoreHandler)
-	e.GET("/api/organizer/billing", billingHandler)
+	e.GET("/api/organizer/billing", billingHandler) // 3秒待てるのでキャッシュしてもよさそう
 	e.GET("/api/organizer/competitions", organizerCompetitionsHandler)
 
 	// 参加者向けAPI
+	// 全部3秒待てるのでキャッシュしてもよさそう
 	e.GET("/api/player/player/:player_id", playerHandler)
 	e.GET("/api/player/competition/:competition_id/ranking", competitionRankingHandler)
 	e.GET("/api/player/competitions", playerCompetitionsHandler)
