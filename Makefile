@@ -55,6 +55,6 @@ deploy: deploy-config deploy-sql deploy-app
 
 .PHONY: port-forward
 port-forward:
-	ssh -N s1 -L 19999:localhost:19999 -L 9000:localhost:9000  -L443:localhost:443 &
+	ssh -N s1 -L 19999:localhost:19999 -L 9000:localhost:9000  &
 	ssh -N s2 -L 29999:localhost:19999 -L 3306:localhost:3306 &
 	ssh -N s3 -L 39999:localhost:19999 &
