@@ -167,8 +167,26 @@ func (j *JSONSerializer) Deserialize(c echo.Context, i interface{}) error {
 	return err
 }
 
+var tenantCache = NewCache[TenantRow]()
+var tenantCacheByName = NewCache[TenantRow]()
+
 func bothInit() {
 	rankingCache.Flush()
+	tenantCache.Flush()
+	tenantCacheByName.Flush()
+	playerDetailCache.Flush()
+
+	var tennants []TenantRow
+
+	err := adminDB.Select(&tennants, "SELECT * FROM tenants")
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, tenant := range tennants {
+		tenantCache.Set(fmt.Sprintf("%d", tenant.ID), tenant)
+		tenantCache.Set(tenant.Name, tenant)
+	}
+
 }
 
 // Run は cmd/isuports/main.go から呼ばれるエントリーポイントです
@@ -178,7 +196,7 @@ func Run() {
 	e.Logger.SetLevel(log.DEBUG)
 	e.JSONSerializer = &JSONSerializer{}
 
-	playerDetailCache.Flush()
+	bothInit()
 
 	var (
 		sqlLogger io.Closer
@@ -382,13 +400,9 @@ func retrieveTenantRowFromHeader(c echo.Context) (*TenantRow, error) {
 
 	// テナントの存在確認
 	var tenant TenantRow
-	if err := adminDB.GetContext(
-		context.Background(),
-		&tenant,
-		"SELECT * FROM tenant WHERE name = ?",
-		tenantName,
-	); err != nil {
-		return nil, fmt.Errorf("failed to Select tenant: name=%s, %w", tenantName, err)
+	tenant, ok := tenantCacheByName.Get(tenantName)
+	if !ok {
+		return nil, fmt.Errorf("failed to Select tenant: name=%s, %w", tenantName, sql.ErrNoRows)
 	}
 	return &tenant, nil
 }
@@ -553,6 +567,18 @@ func tenantsAddHandler(c echo.Context) error {
 			BillingYen:  0,
 		},
 	}
+
+	row := TenantRow{
+		ID:          id,
+		Name:        name,
+		DisplayName: displayName,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+
+	tenantCache.Set(strconv.FormatInt(id, 10), row)
+	tenantCacheByName.Set(row.Name, row)
+
 	return c.JSON(http.StatusOK, SuccessResult{Status: true, Data: res})
 }
 
@@ -1402,8 +1428,9 @@ func competitionRankingHandler(c echo.Context) error {
 	}
 
 	now := time.Now().Unix()
-	var tenant TenantRow
-	if err := adminDB.GetContext(ctx, &tenant, "SELECT * FROM tenant WHERE id = ?", v.tenantID); err != nil {
+
+	tenant, ok := tenantCache.Get(fmt.Sprintf("%d", v.tenantID))
+	if !ok {
 		return fmt.Errorf("error Select tenant: id=%d, %w", v.tenantID, err)
 	}
 
@@ -1669,7 +1696,8 @@ type InitializeHandlerResult struct {
 // ベンチマーカーが起動したときに最初に呼ぶ
 // データベースの初期化などが実行されるため、スキーマを変更した場合などは適宜改変すること
 func initializeHandler(c echo.Context) error {
-	playerDetailCache.Flush()
+	bothInit()
+
 	out, err := exec.Command(initializeScript).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("error exec.Command: %s %e", string(out), err)
