@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/goccy/go-json"
@@ -50,7 +51,9 @@ var (
 
 	adminDB *sqlx.DB
 
-	sqliteDriverName = "sqlite3"
+	sqliteDriverName             = "sqlite3"
+	auto_increment_id      int64 = 0
+	auto_increment_id_base       = strconv.FormatInt(time.Now().Unix()%100000, 10)
 )
 
 // 環境変数を取得する、なければデフォルト値を返す
@@ -117,28 +120,8 @@ func createTenantDB(id int64) error {
 
 // システム全体で一意なIDを生成する
 func dispenseID(ctx context.Context) (string, error) {
-	var id int64
-	var lastErr error
-	for i := 0; i < 100; i++ {
-		var ret sql.Result
-		ret, err := adminDB.ExecContext(ctx, "REPLACE INTO id_generator (stub) VALUES (?);", "a")
-		if err != nil {
-			if merr, ok := err.(*mysql.MySQLError); ok && merr.Number == 1213 { // deadlock
-				lastErr = fmt.Errorf("error REPLACE INTO id_generator: %w", err)
-				continue
-			}
-			return "", fmt.Errorf("error REPLACE INTO id_generator: %w", err)
-		}
-		id, err = ret.LastInsertId()
-		if err != nil {
-			return "", fmt.Errorf("error ret.LastInsertId: %w", err)
-		}
-		break
-	}
-	if id != 0 {
-		return fmt.Sprintf("%x", id), nil
-	}
-	return "", lastErr
+	newId := atomic.AddInt64(&auto_increment_id, 1)
+	return fmt.Sprintf("%d%s", newId, auto_increment_id_base), nil
 }
 
 // TODO(p1ass) これ消したい
