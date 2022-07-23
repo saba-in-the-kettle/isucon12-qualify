@@ -1333,6 +1333,7 @@ func playerHandler(c echo.Context) error {
 	if err := tenantDB.GetContext(
 		ctx,
 		&pss,
+		// TODO: indexを貼る
 		"select tenant_id, id, player_id, competition_id, score, max(row_num) as row_num, created_at, updated_at from player_score where player_id = ? and competition_id in (?) group by competition_id",
 		playerID,
 		cIDs,
