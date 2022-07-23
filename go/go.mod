@@ -14,6 +14,8 @@ require (
 	github.com/shogo82148/go-sql-proxy v0.6.1
 )
 
+require github.com/google/uuid v1.3.0 // indirect
+
 require (
 	github.com/Microsoft/go-winio v0.4.16 // indirect
 	github.com/ProtonMail/go-crypto v0.0.0-20210428141323-04723f9f07d7 // indirect
