@@ -21,7 +21,7 @@ START_ECHO=echo "$(GREEN)$(BOLD)[INFO] start $@ $$s $(RESET)"
 build:
 	@ $(START_ECHO);\
 	cd $(BUILD_DIR); \
-	docker-compose up --build
+	CGO_ENABLED=1 GOOS=linux GOARCH=amd64 CC="zig cc -target x86_64-linux" CXX="zig c++ -target x86_64-linux" make isuports
 
 .PHONY: deploy-app
 deploy-app: build
