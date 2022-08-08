@@ -12,7 +12,7 @@ truncate -s 0 /var/log/nginx/access.log
 
 sudo systemctl restart nginx
 sudo systemctl disable --now mysql
-sudo systemctl disable --now netdata
+sudo systemctl start netdata
 
 QUERY="CREATE USER IF NOT EXISTS 'isucon'@'%' identified by 'isucon';
 GRANT ALL privileges on *.* to isucon@'%';

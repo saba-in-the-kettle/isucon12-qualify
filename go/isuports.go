@@ -977,6 +977,12 @@ func playersAddHandler(c echo.Context) error {
 		args = append(args, now)
 	}
 
+	lock, err := flockByTenantID(v.tenantID)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
+
 	_, err = tenantDB.ExecContext(ctx, "INSERT INTO player (id, tenant_id, display_name, is_disqualified, created_at, updated_at) VALUES "+placeholders, args...)
 	if err != nil {
 		return fmt.Errorf("error Insert player at tenantDB %v", err)
@@ -1129,6 +1135,12 @@ func competitionFinishHandler(c echo.Context) error {
 		}
 		return fmt.Errorf("error retrieveCompetition: %w", err)
 	}
+
+	lock, err := flockByTenantID(v.tenantID)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
 
 	now := time.Now().Unix()
 	if _, err := tenantDB.ExecContext(
@@ -1614,6 +1626,7 @@ func competitionRankingHandler(c echo.Context) error {
 	ctx := context.Background()
 	v, err := parseViewer(c)
 	if err != nil {
+		c.Logger().Errorf("error parseViewer: %s", err)
 		return err
 	}
 	if v.role != RolePlayer {
@@ -1622,10 +1635,12 @@ func competitionRankingHandler(c echo.Context) error {
 
 	tenantDB, err := connectToTenantDB(v.tenantID)
 	if err != nil {
+		c.Logger().Errorf("error connecting to tenant db: %v", err)
 		return err
 	}
 
 	if err := authorizePlayer(ctx, tenantDB, v.playerID); err != nil {
+		c.Logger().Errorf("error authorizing player: %v", err)
 		return err
 	}
 
